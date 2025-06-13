@@ -66,19 +66,19 @@ For small-scale experiments which can be run with CPU, you can run the following
 - Matrix logistic regression (a strongly convex problem with stochastic gradient):
     ```
     # PolarSGD
-    python mat_log_reg.py --seed=42
+    python mat_log_reg.py --steps=1500 --seed=42
 
     # PolarSGDM
-    python mat_log_reg_mom.py --seed=42
+    python mat_log_reg_mom.py --steps=1500 --seed=42
     ```
 
 - Low-rank matrix completion (a non-convex problem with deterministic gradient):
     ```
     # PolarGrad
-    python low_rank_mat_comp.py --seed=42
+    python low_rank_mat_comp.py --steps=1000 --seed=42
 
     # PolarGradM
-    python low_rank_mat_comp_mom.py --seed=42
+    python low_rank_mat_comp_mom.py --steps=200 --seed=42
     ```
 
 We will update the repository with examples and experiments for language model pre-training soon. 
