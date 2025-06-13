@@ -87,7 +87,7 @@ We will update the repository with examples and experiments for language model p
 
 
 ## Citation
-If you find this repository useful for your research, please consider citing the following paper using the BibTeX entry below:
+If you find this repository useful for your research, please consider citing our paper using the BibTeX entry below:
 ```
 @article{lau2025polargrad,
 	title={\textsc{PolarGrad}: A Class of Matrix-Gradient Optimizers from a Unifying Preconditioning Perspective},
