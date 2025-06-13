@@ -1,6 +1,6 @@
 # PolarGrad: A Class of Matrix-Gradient Optimizers from a Unifying Preconditioning Perspective
 
-PolarGrad (Polar Gradient methods; Lau et al., 2025) is a class of matrix-gradient optimizers based on the concept of gradient-anisotropy preconditioning in optimization. It has close relation to [Muon](https://github.com/KellerJordan/Muon) (Jordan et al., 2024) and stochastic spectral descent (SSD; Carlson et al., 2015a, 2015b). In addition to being an optimizer for matrix parameters in neural networks, PolarGrad can also be viewed as a preconditioned matrix optimization algorithm for matrix optimization problems such as low-rank matrix factorization/completion. 
+[PolarGrad](https://arxiv.org/abs/2505.21799) (Polar Gradient methods; Lau et al., 2025) is a class of matrix-gradient optimizers based on the concept of gradient-anisotropy preconditioning in optimization. It has close relation to [Muon](https://github.com/KellerJordan/Muon) (Jordan et al., 2024) and stochastic spectral descent (SSD; Carlson et al., 2015a, 2015b). In addition to being an optimizer for matrix parameters in neural networks, PolarGrad can also be used as a preconditioned matrix optimization algorithm for matrix optimization problems such as matrix regression and low-rank matrix factorization/completion. 
 
 The main differences between PolarGrad and Muon/SSD are:
 - PolarGrad uses the QDWH (Nakatsukasa et al., 2010) or ZOLO-PD (Nakatsukasa and Freund, 2016) algorithm to compute the polar decomposition of the gradient matrix, while Muon uses the Newton-Schulz iteration to compute the polar decomposition (see the section below for further details). The NS iteration is a matrix iterative polynomial method that computes the polar decomposition of a matrix by iteratively applying a polynomial to the matrix. However, it requires tuning of the coefficients of the polynomial, which can be challenging in practice. PolarGrad also include the nuclear norm (the dual norm of the spectral norm) scaling of the update matrix, which is not present in Muon. The inclusion of such term is necessary for the convergence of optimizers based on polar decomposition for strongly convex and Lipschitz smooth problems with deterministic gradients, as shown in the convergence analysis and the matrix quadratic regression example of PolarGrad (Lau et al., 2025). 
@@ -23,7 +23,7 @@ In particular, with the assist of ChatGPT, we translated these implementations i
 
     iii. `method=ns`: uses the Newton-Schulz (NS) iteration to compute the polar decomposition of a matrix. This might require tuning of the coefficients of the matrix iterative polynomial for different model and layer sizes, which can be challenging in practice. This is the same method used in the Muon optimizer (Jordan et al., 2024), and is adopted from its [GitHub repository](https://github.com/KellerJordan/Muon).
 
-    iv. `method=precond_ns`: uses the preconditioned Newton-Schulz iteration in Lewis et al. (2022) to compute the polar decomposition of a matrix. This is potentially an improved variant of the NS iteration with the need of coefficient tuning, but might still suffer from the stability issue of the NS iteration. We include this method for completeness, but is not heavily tested and not used in the experiments in the paper.
+    iv. `method=precond_ns`: uses the preconditioned Newton-Schulz iteration in [Lewis et al. (2022)](https://doi.org/10.1073/pnas.2122762119) to compute the polar decomposition of a matrix. This is potentially an improved variant of the NS iteration with the need of coefficient tuning, but might still suffer from the stability issue of the NS iteration. We include this method for completeness, but is not heavily tested and not used in the experiments in the paper.
 
 
 2. `polar_grad.py`: includes the `torch.optim.Optimizer` class `PolarGrad` which implements the PolarGrad optimizer based on the above four numerical polar decomposition algorithms of the gradient matrix. 
@@ -38,8 +38,6 @@ In particular, with the assist of ChatGPT, we translated these implementations i
     ```
 
 3. `polar_grad_ddp.py`: includes the `torch.optim.Optimizer` class `PolarGrad` which implements the PolarGrad optimizer based on the above four numerical polar decomposition algorithms of the gradient matrix with `torch.distributed`, following the implementation in Muon's [GitHub repository](https://github.com/KellerJordan/Muon).
-
-
 
 
 ## Installation of Required Libraries
@@ -90,10 +88,10 @@ We will update the repository with examples and experiments for language model p
 If you find this repository useful for your research, please consider citing our paper using the BibTeX entry below:
 ```
 @article{lau2025polargrad,
-	title={\textsc{PolarGrad}: A Class of Matrix-Gradient Optimizers from a Unifying Preconditioning Perspective},
-	author={Lau, Tim Tsz-Kit and Qi Long and Weijie Su},
-	year={2025},
-	journal={arXiv preprint arXiv:2505.21799}
+  title={\textsc{PolarGrad}: A Class of Matrix-Gradient Optimizers from a Unifying Preconditioning Perspective},
+  author={Lau, Tim Tsz-Kit and Qi Long and Weijie Su},
+  year={2025},
+  journal={arXiv preprint arXiv:2505.21799}
 }
 ```
 
@@ -113,4 +111,4 @@ If you find this repository useful for your research, please consider citing our
 
 - Nakatsukasa, Yuji, and Nicholas J. Higham. [Backward stability of iterations for computing the polar decomposition](https://doi.org/10.1137/110857544). *SIAM Journal on Matrix Analysis and Applications*, 33(2):460-479, 2012.
 
-- Lewis, Adam G. M., Jackson Beall, Martin Ganahl, Markus Hauru, Shrestha Basu Mallick, and Guifre Vidal. [Large-scale distributed linear algebra with tensor processing units](). *Proceedings of the National Academy of Sciences*, 119(33):e2122762119, 2022. 
+- Lewis, Adam G. M., Jackson Beall, Martin Ganahl, Markus Hauru, Shrestha Basu Mallick, and Guifre Vidal. [Large-scale distributed linear algebra with tensor processing units](https://doi.org/10.1073/pnas.2122762119). *Proceedings of the National Academy of Sciences*, 119(33):e2122762119, 2022. 
