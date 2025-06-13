@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License
 
-"""A torch.compile-compatible library for QDWH-based polar decomposition, modified from JAX.
+"""A PyTorch library for QDWH-based polar decomposition, modified from JAX.
 https://github.com/jax-ml/jax/blob/main/jax/_src/lax/qdwh.py
 
 QDWH is short for QR-based dynamically weighted Halley iteration. The Halley
