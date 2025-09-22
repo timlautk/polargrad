@@ -25,6 +25,7 @@ In particular, with the assist of ChatGPT, we translated these implementations i
 
     iv. `method=precond_ns`: uses the preconditioned Newton-Schulz iteration in [Lewis et al. (2022)](https://doi.org/10.1073/pnas.2122762119) to compute the polar decomposition of a matrix. This is potentially an improved variant of the NS iteration with the need of coefficient tuning, but might still suffer from the stability issue of the NS iteration. We include this method for completeness, but is not heavily tested and not used in the experiments in the paper.
 
+    v. `method=polar_express`: uses the Polar Express method in [Amsel et al. (2025)](https://arxiv.org/abs/2505.16932) to compute the polar decomposition of a matrix. This method uses polynomial approximations of the sign function to compute the polar decomposition, rather than rational approximations of the sign function used in the QDWH and ZOLO-PD algorithms, hence avoiding the use of QR decompositions and involving only matrix-matrix products (in half-precision arithmetic). 
 
 2. `polar_grad.py`: includes the `torch.optim.Optimizer` class `PolarGrad` which implements the PolarGrad optimizer based on the above four numerical polar decomposition algorithms of the gradient matrix. 
     - The argument `polar_first` specifies whether polar-first momentum is used; default is `False` which is similar to the implementation of Muon (Jordan et al., 2024). 
@@ -112,3 +113,5 @@ If you find this repository useful for your research, please consider citing our
 - Nakatsukasa, Yuji, and Nicholas J. Higham. [Backward stability of iterations for computing the polar decomposition](https://doi.org/10.1137/110857544). *SIAM Journal on Matrix Analysis and Applications*, 33(2):460-479, 2012.
 
 - Lewis, Adam G. M., Jackson Beall, Martin Ganahl, Markus Hauru, Shrestha Basu Mallick, and Guifre Vidal. [Large-scale distributed linear algebra with tensor processing units](https://doi.org/10.1073/pnas.2122762119). *Proceedings of the National Academy of Sciences*, 119(33):e2122762119, 2022. 
+
+- Amsel, Noah, David Persson, Christopher Musco, and Robert M. Gower. [The Polar Express: Optimal matrix sign methods and their application to the Muon algorithm](https://arxiv.org/abs/2505.16932). *arXiv preprint arXiv:2505.16932*, 2025.
