@@ -188,12 +188,12 @@ def main(seed=42, steps=200):
         return losses, condition_numbers_grad_X, condition_numbers_grad_Y, nuc_norms_grad_X, nuc_norms_grad_Y
 
     # Compare optimizers
-    loss_polar_grad_lr, cond_X_polar_grad_lr, cond_Y_polar_grad_lr, nuc_X_polar_grad_lr, nuc_Y_polar_grad_lr = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1)
-    loss_polar_grad_lr_decay, cond_X_polar_grad_lr_decay, cond_Y_polar_grad_lr_decay, nuc_X_polar_grad_lr_decay, nuc_Y_polar_grad_lr_decay = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1, scheduler=True)
-    loss_polar_grad_lr_polar_first, cond_X_polar_grad_lr_polar_first, cond_Y_polar_grad_lr_polar_first, nuc_X_polar_grad_lr_polar_first, nuc_Y_polar_grad_lr_polar_first = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1, momentum=True, polar_first=True)
-    loss_polar_grad_lr_polar_first_decay, cond_X_polar_grad_lr_polar_first_decay, cond_Y_polar_grad_lr_polar_first_decay, nuc_X_polar_grad_lr_polar_first_decay, nuc_Y_polar_grad_lr_polar_first_decay = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1, scheduler=True, momentum=True, polar_first=True)
-    loss_polar_grad_lr_momentum_first, cond_X_polar_grad_lr_momentum_first, cond_Y_polar_grad_lr_momentum_first, nuc_X_polar_grad_lr_momentum_first, nuc_Y_polar_grad_lr_momentum_first = train_lowrank(PolarGrad, method='qdwh', lr=7.5e0, momentum=True)
-    loss_polar_grad_lr_momentum_first_decay, cond_X_polar_grad_lr_momentum_first_decay, cond_Y_polar_grad_lr_momentum_first_decay, nuc_X_polar_grad_lr_momentum_first_decay, nuc_Y_polar_grad_lr_momentum_first_decay = train_lowrank(PolarGrad, method='qdwh', lr=7.5e0, scheduler=True, momentum=True)
+    loss_polar_grad_lr, cond_X_polar_grad_lr, cond_Y_polar_grad_lr, nuc_X_polar_grad_lr, nuc_Y_polar_grad_lr = train_lowrank(PolarGrad, method='qdwh', lr=5e1)
+    loss_polar_grad_lr_decay, cond_X_polar_grad_lr_decay, cond_Y_polar_grad_lr_decay, nuc_X_polar_grad_lr_decay, nuc_Y_polar_grad_lr_decay = train_lowrank(PolarGrad, method='qdwh', lr=5e1, scheduler=True)
+    loss_polar_grad_lr_polar_first, cond_X_polar_grad_lr_polar_first, cond_Y_polar_grad_lr_polar_first, nuc_X_polar_grad_lr_polar_first, nuc_Y_polar_grad_lr_polar_first = train_lowrank(PolarGrad, method='qdwh', lr=1e2, momentum=True, polar_first=True)
+    loss_polar_grad_lr_polar_first_decay, cond_X_polar_grad_lr_polar_first_decay, cond_Y_polar_grad_lr_polar_first_decay, nuc_X_polar_grad_lr_polar_first_decay, nuc_Y_polar_grad_lr_polar_first_decay = train_lowrank(PolarGrad, method='qdwh', lr=1e2, scheduler=True, momentum=True, polar_first=True)
+    loss_polar_grad_lr_momentum_first, cond_X_polar_grad_lr_momentum_first, cond_Y_polar_grad_lr_momentum_first, nuc_X_polar_grad_lr_momentum_first, nuc_Y_polar_grad_lr_momentum_first = train_lowrank(PolarGrad, method='qdwh', lr=5e1, momentum=True)
+    loss_polar_grad_lr_momentum_first_decay, cond_X_polar_grad_lr_momentum_first_decay, cond_Y_polar_grad_lr_momentum_first_decay, nuc_X_polar_grad_lr_momentum_first_decay, nuc_Y_polar_grad_lr_momentum_first_decay = train_lowrank(PolarGrad, method='qdwh', lr=5e1, scheduler=True, momentum=True)
 
 
     ## Plots

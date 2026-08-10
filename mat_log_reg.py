@@ -124,11 +124,11 @@ def main(
         measured_steps = int(benchmark_steps or steps)
         batch_size = 1000
         configurations = [
-            ("PolarSGD (QDWH)", PolarGrad, "qdwh", 2.5e-7, False),
-            ("PolarSGD (QDWH; lr decay)", PolarGrad, "qdwh", 5e-7, True),
-            ("Muon (NS)", Muon_polar, "ns", 7.5e-2, False),
-            ("Muon (QDWH)", Muon_polar, "qdwh", 7.5e-2, False),
-            ("Muon (QDWH; lr decay)", Muon_polar, "qdwh", 1.5e-1, True),
+            ("PolarSGD (QDWH)", PolarGrad, "qdwh", 1.5e-7, False),
+            ("PolarSGD (QDWH; lr decay)", PolarGrad, "qdwh", 2.5e-7, True),
+            ("Muon (NS)", Muon_polar, "ns", 1e-1, False),
+            ("Muon (QDWH)", Muon_polar, "qdwh", 1e-1, False),
+            ("Muon (QDWH; lr decay)", Muon_polar, "qdwh", 2e-1, True),
             ("Adam", torch.optim.Adam, None, 5e-3, False),
             ("Adam (lr decay)", torch.optim.Adam, None, 1e-2, True),
         ]
@@ -270,11 +270,11 @@ def main(
         return
 
     # Compare optimizers
-    loss_polar_grad, cond_grad_polar_grad, nuc_polar_grad = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7)
-    loss_polar_grad_decay, cond_grad_polar_grad_decay, nuc_polar_grad_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=5e-7, scheduler=True)
-    loss_muon, cond_grad_muon, nuc_muon = run_stochastic_optimizer(Muon_polar, method='ns', lr=7.5e-2)
-    loss_muon_qdwh, cond_grad_muon_qdwh, nuc_muon_qdwh = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=7.5e-2)
-    loss_muon_qdwh_decay, cond_grad_muon_qdwh_decay, nuc_muon_qdwh_decay = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=1.5e-1, scheduler=True)
+    loss_polar_grad, cond_grad_polar_grad, nuc_polar_grad = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=1.5e-7)
+    loss_polar_grad_decay, cond_grad_polar_grad_decay, nuc_polar_grad_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7, scheduler=True)
+    loss_muon, cond_grad_muon, nuc_muon = run_stochastic_optimizer(Muon_polar, method='ns', lr=1e-1)
+    loss_muon_qdwh, cond_grad_muon_qdwh, nuc_muon_qdwh = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=1e-1)
+    loss_muon_qdwh_decay, cond_grad_muon_qdwh_decay, nuc_muon_qdwh_decay = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=2e-1, scheduler=True)
     loss_adam, cond_grad_adam, nuc_adam = run_stochastic_optimizer(torch.optim.Adam, lr=5e-3)
     loss_adam_decay, cond_grad_adam_decay, nuc_adam_decay = run_stochastic_optimizer(torch.optim.Adam, lr=1e-2, scheduler=True)
 

@@ -109,14 +109,14 @@ def main(seed=42, steps=1500):
     
 
     # Compare optimizers
-    loss_polar_grad, cond_grad_polar_grad, nuc_polar_grad = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7)
-    loss_polar_grad_decay, cond_grad_polar_grad_decay, nuc_polar_grad_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=5e-7, scheduler=True)
-    loss_polar_grad_polar_first, cond_grad_polar_grad_polar_first, nuc_polar_grad_polar_first = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=5e-7, momentum=True, polar_first=True)
-    loss_polar_grad_polar_first_decay, cond_grad_polar_grad_polar_first_decay, nuc_polar_grad_polar_first_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=5e-7, momentum=True, polar_first=True, scheduler=True)
-    loss_polar_grad_momentum_first, cond_grad_polar_grad_momentum_first, nuc_polar_grad_momentum_first = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=5e-7, momentum=True)
-    loss_polar_grad_momentum_first_decay, cond_grad_polar_grad_momentum_first_decay, nuc_polar_grad_momentum_first_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=5e-7, momentum=True, scheduler=True)
-    loss_muon_qdwh, cond_grad_muon_qdwh, nuc_muon_qdwh = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=7.5e-2)
-    loss_muon_qdwh_decay, cond_grad_muon_qdwh_decay, nuc_muon_qdwh_decay = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=1.5e-1, scheduler=True)
+    loss_polar_grad, cond_grad_polar_grad, nuc_polar_grad = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=1.5e-7)
+    loss_polar_grad_decay, cond_grad_polar_grad_decay, nuc_polar_grad_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7, scheduler=True)
+    loss_polar_grad_polar_first, cond_grad_polar_grad_polar_first, nuc_polar_grad_polar_first = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7, momentum=True, polar_first=True)
+    loss_polar_grad_polar_first_decay, cond_grad_polar_grad_polar_first_decay, nuc_polar_grad_polar_first_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7, momentum=True, polar_first=True, scheduler=True)
+    loss_polar_grad_momentum_first, cond_grad_polar_grad_momentum_first, nuc_polar_grad_momentum_first = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7, momentum=True)
+    loss_polar_grad_momentum_first_decay, cond_grad_polar_grad_momentum_first_decay, nuc_polar_grad_momentum_first_decay = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7, momentum=True, scheduler=True)
+    loss_muon_qdwh, cond_grad_muon_qdwh, nuc_muon_qdwh = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=1e-1)
+    loss_muon_qdwh_decay, cond_grad_muon_qdwh_decay, nuc_muon_qdwh_decay = run_stochastic_optimizer(Muon_polar, method='qdwh', lr=2e-1, scheduler=True)
 
 
     ## Plots
