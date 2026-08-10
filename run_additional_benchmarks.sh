@@ -2,7 +2,7 @@
 set -euo pipefail
 
 mode=${1:-all}
-profile_root=${POLARGRAD_PROFILE_ROOT:-results}
+profile_root=${POLARGRAD_PROFILE_ROOT:-results_additional}
 metrics=gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed
 
 mkdir -p "${profile_root}/ncu" "${profile_root}/profile_runs"
