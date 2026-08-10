@@ -26,6 +26,13 @@ import torch.nn as nn
 
 from polar_grad import PolarGrad
 from muon import Muon_polar
+from benchmarking import (
+    print_benchmark_summary,
+    resolve_device,
+    run_training_benchmark,
+    save_benchmark_results,
+    seed_everything,
+)
 
 
 def smooth(scalars: np.array, weight: float = 0.8) -> np.array:  # Weight between 0 and 1
@@ -75,15 +82,18 @@ def inverse_hessian_preconditioner_2(A, B):
     return AtA_inv, BtB_inv, AtA, BtB
 
 
-def main(seed=42, steps=4000):
-    # Check device
-    # if torch.backends.mps.is_available():
-    #     device = torch.device("mps")
-    # elif torch.cuda.is_available():
-    #     device = torch.device("cuda")
-    # else:
-    #     device = torch.device("cpu")
-    device = torch.device("cpu")
+def main(
+    seed=42,
+    steps=4000,
+    device="cpu",
+    benchmark=False,
+    benchmark_only=False,
+    benchmark_steps=None,
+    benchmark_warmup=10,
+    benchmark_repeats=3,
+    results_dir="results",
+):
+    device = resolve_device(device)
     print(f"Using device: {device}")
 
     # Matrix dimensions
@@ -106,7 +116,158 @@ def main(seed=42, steps=4000):
     AtA_inv = torch.linalg.inv(A.T @ A)     # (m x m)
     BBt_inv = torch.linalg.inv(B @ B.T)
     X_star = AtA_inv @ A.T @ C @ B.T @ BBt_inv
-    print(f"Loss at X_star: {loss_fn(X_star, A, B, C).item()}")
+    optimal_loss = loss_fn(X_star, A, B, C).item()
+    print(f"Loss at X_star: {optimal_loss}")
+
+    def make_optimizer(model, optimizer_cls, method, lr, use_scheduler):
+        inner_steps = 5 if method == "ns" else 2
+        if optimizer_cls == torch.optim.Adam:
+            optimizer = optimizer_cls(model.parameters(), lr=lr)
+        elif optimizer_cls == PolarGrad:
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr, momentum=0.,
+                inner_steps=inner_steps
+            )
+        else:
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr,
+                inner_steps=inner_steps
+            )
+        scheduler = None
+        if use_scheduler:
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=25, gamma=0.99
+            )
+        return optimizer, scheduler
+
+    def run_benchmarks():
+        measured_steps = int(benchmark_steps or steps)
+        configurations = [
+            ("PolarGrad (QDWH)", PolarGrad, "qdwh", 4e-8, False),
+            ("PolarGrad (ZOLO-PD)", PolarGrad, "zolo-pd", 3e-8, False),
+            ("PolarGrad (QDWH; lr decay)", PolarGrad, "qdwh", 4.75e-8, True),
+            ("Muon (NS)", Muon_polar, "ns", 1e-1, False),
+            ("Muon (QDWH)", Muon_polar, "qdwh", 1e-1, False),
+            ("Muon (QDWH; lr decay)", Muon_polar, "qdwh", 5e-2, True),
+            ("Muon (ZOLO-PD)", Muon_polar, "zolo-pd", 1e-1, False),
+            ("Adam", torch.optim.Adam, None, 5e-2, False),
+            ("Adam (lr decay)", torch.optim.Adam, None, 5e-2, True),
+        ]
+        records = []
+        for name, optimizer_cls, method, lr, use_scheduler in configurations:
+            def setup_fn(run_seed, optimizer_cls=optimizer_cls, method=method,
+                         lr=lr, use_scheduler=use_scheduler):
+                seed_everything(run_seed, device)
+                model = MatrixQuadraticModel(m, n).to(device)
+                optimizer, scheduler = make_optimizer(
+                    model, optimizer_cls, method, lr, use_scheduler
+                )
+                return {
+                    "model": model,
+                    "optimizer": optimizer,
+                    "scheduler": scheduler,
+                }
+
+            def step_fn(state, recorder):
+                if recorder is not None:
+                    recorder.start_step()
+                model = state["model"]
+                optimizer = state["optimizer"]
+                loss = model(A, B, C)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if recorder is not None:
+                    recorder.start_optimizer()
+                optimizer.step()
+                if state["scheduler"] is not None:
+                    state["scheduler"].step()
+                if recorder is not None:
+                    recorder.end_step()
+                return loss
+
+            records.extend(
+                run_training_benchmark(
+                    name=name,
+                    setup_fn=setup_fn,
+                    step_fn=step_fn,
+                    seed=seed,
+                    steps=measured_steps,
+                    warmup_steps=int(benchmark_warmup),
+                    repeats=int(benchmark_repeats),
+                    device=device,
+                    metadata={
+                        "optimizer": optimizer_cls.__name__,
+                        "polar_method": method,
+                        "inner_steps": (
+                            5 if method == "ns" else
+                            2 if method == "qdwh" else None
+                        ),
+                        "learning_rate": lr,
+                        "lr_decay": use_scheduler,
+                        "matrix_shape": f"{m}x{n}",
+                        "data_shapes": f"A:{p}x{m};B:{n}x{q};C:{p}x{q}",
+                        "dtype": str(A.dtype),
+                    },
+                )
+            )
+
+        def setup_newton(run_seed):
+            seed_everything(run_seed, device)
+            model = MatrixQuadraticModel(m, n).to(device)
+            left_inv, right_inv = inverse_hessian_preconditioner(A, B)
+            return {
+                "model": model,
+                "optimizer": None,
+                "left_inv": left_inv,
+                "right_inv": right_inv,
+            }
+
+        def step_newton(state, recorder):
+            if recorder is not None:
+                recorder.start_step()
+            model = state["model"]
+            loss = loss_fn(model.X, A, B, C)
+            gradient = grad(model.X, A, B, C)
+            if recorder is not None:
+                recorder.start_optimizer()
+            model.X.data.add_(
+                state["left_inv"] @ gradient @ state["right_inv"], alpha=-2.5e-1
+            )
+            if recorder is not None:
+                recorder.end_step()
+            return loss
+
+        records.extend(
+            run_training_benchmark(
+                name="Newton (inverse Hessian)",
+                setup_fn=setup_newton,
+                step_fn=step_newton,
+                seed=seed,
+                steps=measured_steps,
+                warmup_steps=int(benchmark_warmup),
+                repeats=int(benchmark_repeats),
+                device=device,
+                metadata={
+                    "optimizer": "inverse_hessian",
+                    "polar_method": None,
+                    "learning_rate": 2.5e-1,
+                    "lr_decay": False,
+                    "matrix_shape": f"{m}x{n}",
+                    "data_shapes": f"A:{p}x{m};B:{n}x{q};C:{p}x{q}",
+                    "dtype": str(A.dtype),
+                },
+            )
+        )
+        print_benchmark_summary(records)
+        paths = save_benchmark_results(
+            records=records,
+            experiment="mat_quad_reg",
+            seed=seed,
+            output_dir=results_dir,
+            device=device,
+        )
+        print(f"Saved benchmark results: {paths}")
+        return records
 
     # Optimization loop
     def run_quadratic(optimizer_cls, method='qdwh', steps=steps, lr=0.05, scheduler=False):
@@ -115,9 +276,15 @@ def main(seed=42, steps=4000):
         if optimizer_cls == torch.optim.Adam:
             optimizer = optimizer_cls(model.parameters(), lr=lr)
         elif optimizer_cls == PolarGrad:
-            optimizer = optimizer_cls(model.parameters(), method=method, lr=lr, momentum=0.)
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr, momentum=0.,
+                inner_steps=5 if method == 'ns' else 2
+            )
         else:            
-            optimizer = optimizer_cls(model.parameters(), method=method, lr=lr)
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr,
+                inner_steps=5 if method == 'ns' else 2
+            )
         if scheduler:
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=25, gamma=0.99)
         losses = []
@@ -131,7 +298,7 @@ def main(seed=42, steps=4000):
             optimizer.step()
             if scheduler:
                 scheduler.step()
-            losses.append(loss.item() - loss_fn(X_star, A, B, C).item())
+            losses.append(loss.item() - optimal_loss)
             condition_numbers_residual.append(torch.linalg.cond(A @ model.X @ B - C).item())
             condition_numbers_grad.append(torch.linalg.cond(grad(model.X, A, B, C)).item())
             nuc_norms_grad.append(torch.linalg.matrix_norm(grad(model.X, A, B, C), ord='nuc').item())
@@ -154,7 +321,7 @@ def main(seed=42, steps=4000):
             G = grad(X, A, B, C)
             precond_grad = AtA_inv @ G @ BtB_inv
             model.X.data -= lr * precond_grad
-            losses.append(loss_fn(model.X, A, B, C).item() - loss_fn(X_star, A, B, C).item())
+            losses.append(loss_fn(model.X, A, B, C).item() - optimal_loss)
             condition_numbers_residual.append(torch.linalg.cond(A @ model.X @ B - C).item())
             condition_numbers_grad.append(torch.linalg.cond(grad(model.X, A, B, C)).item())
             nuc_norms_grad.append(torch.linalg.matrix_norm(grad(model.X, A, B, C), ord='nuc').item())
@@ -163,6 +330,9 @@ def main(seed=42, steps=4000):
         nuc_norms_grad = smooth(nuc_norms_grad)
         return losses, condition_numbers_residual, condition_numbers_grad, nuc_norms_grad
 
+    if benchmark_only:
+        run_benchmarks()
+        return
 
     # Compare optimizers
     loss_polar_grad_quad, cond_polar_grad_quad, cond_grad_polar_grad_quad, nuc_polar_grad_quad = run_quadratic(PolarGrad, method='qdwh', lr=4e-8)
@@ -245,6 +415,9 @@ def main(seed=42, steps=4000):
     fig2.subplots_adjust(bottom=0.22)
     fig2.savefig(f'fig/mat_quad_reg_nuc_{seed}.pdf', dpi=500, bbox_inches='tight')
     plt.close(fig2)
+
+    if benchmark:
+        run_benchmarks()
 
 
 if __name__ == "__main__":

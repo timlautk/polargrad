@@ -27,6 +27,13 @@ import torch.nn.functional as F
 
 from polar_grad import PolarGrad
 from muon import Muon_polar
+from benchmarking import (
+    print_benchmark_summary,
+    resolve_device,
+    run_training_benchmark,
+    save_benchmark_results,
+    seed_everything,
+)
 
 
 def smooth(scalars: np.array, weight: float = 0.8) -> np.array:  # Weight between 0 and 1
@@ -48,15 +55,18 @@ class MatrixLogisticRegression(nn.Module):
         return torch.sum(F.softplus(-C_batch * logits))
 
 
-def main(seed=42, steps=1500):
-    # Check device
-    # if torch.backends.mps.is_available():
-    #     device = torch.device("mps")
-    # elif torch.cuda.is_available():
-    #     device = torch.device("cuda")
-    # else:
-    #     device = torch.device("cpu")
-    device = torch.device("cpu")
+def main(
+    seed=42,
+    steps=1500,
+    device="cpu",
+    benchmark=False,
+    benchmark_only=False,
+    benchmark_steps=None,
+    benchmark_warmup=10,
+    benchmark_repeats=3,
+    results_dir="results",
+):
+    device = resolve_device(device)
     print(f"Using device: {device}")
 
     # Problem setup
@@ -65,12 +75,115 @@ def main(seed=42, steps=1500):
     torch.manual_seed(seed)
     A = torch.randn(N, m, device=device)
     B = torch.randn(n, q, device=device)
-    C = (torch.rand(N, q, device=device) > 0.5).float()
+    C = (torch.randn(N, q, device=device) > 0.5).float()
 
     # Subsampling utility for mini-batch rows of A and C
     def sample_batch(batch_size=1000):
         idx = torch.randint(0, N, (batch_size,), device=device)
         return A[idx], B, C[idx]
+
+    def make_optimizer(model, optimizer_cls, method, lr, use_scheduler):
+        inner_steps = 5 if method == "ns" else 2
+        if optimizer_cls == torch.optim.Adam:
+            optimizer = optimizer_cls(model.parameters(), lr=lr)
+        elif optimizer_cls == PolarGrad:
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr, momentum=0.,
+                inner_steps=inner_steps
+            )
+        else:
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr,
+                inner_steps=inner_steps
+            )
+        scheduler = None
+        if use_scheduler:
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=25, gamma=0.95
+            )
+        return optimizer, scheduler
+
+    def run_benchmarks():
+        measured_steps = int(benchmark_steps or steps)
+        batch_size = 1000
+        configurations = [
+            ("PolarSGD (QDWH)", PolarGrad, "qdwh", 2.5e-7, False),
+            ("PolarSGD (QDWH; lr decay)", PolarGrad, "qdwh", 5e-7, True),
+            ("Muon (NS)", Muon_polar, "ns", 7.5e-2, False),
+            ("Muon (QDWH)", Muon_polar, "qdwh", 7.5e-2, False),
+            ("Muon (QDWH; lr decay)", Muon_polar, "qdwh", 1.5e-1, True),
+            ("Adam", torch.optim.Adam, None, 5e-3, False),
+            ("Adam (lr decay)", torch.optim.Adam, None, 1e-2, True),
+        ]
+        records = []
+        for name, optimizer_cls, method, lr, use_scheduler in configurations:
+            def setup_fn(run_seed, optimizer_cls=optimizer_cls, method=method,
+                         lr=lr, use_scheduler=use_scheduler):
+                seed_everything(run_seed, device)
+                model = MatrixLogisticRegression(m, n).to(device)
+                optimizer, scheduler = make_optimizer(
+                    model, optimizer_cls, method, lr, use_scheduler
+                )
+                return {
+                    "model": model,
+                    "optimizer": optimizer,
+                    "scheduler": scheduler,
+                }
+
+            def step_fn(state, recorder):
+                if recorder is not None:
+                    recorder.start_step()
+                A_batch, B_batch, C_batch = sample_batch(batch_size)
+                model = state["model"]
+                optimizer = state["optimizer"]
+                optimizer.zero_grad(set_to_none=True)
+                loss = model(A_batch, B_batch, C_batch)
+                loss.backward()
+                if recorder is not None:
+                    recorder.start_optimizer()
+                optimizer.step()
+                if state["scheduler"] is not None:
+                    state["scheduler"].step()
+                if recorder is not None:
+                    recorder.end_step()
+                return loss
+
+            records.extend(
+                run_training_benchmark(
+                    name=name,
+                    setup_fn=setup_fn,
+                    step_fn=step_fn,
+                    seed=seed,
+                    steps=measured_steps,
+                    warmup_steps=int(benchmark_warmup),
+                    repeats=int(benchmark_repeats),
+                    device=device,
+                    metadata={
+                        "optimizer": optimizer_cls.__name__,
+                        "polar_method": method,
+                        "inner_steps": (
+                            5 if method == "ns" else
+                            2 if method == "qdwh" else None
+                        ),
+                        "learning_rate": lr,
+                        "lr_decay": use_scheduler,
+                        "batch_size": batch_size,
+                        "matrix_shape": f"{m}x{n}",
+                        "data_shapes": f"A:{N}x{m};B:{n}x{q};C:{N}x{q}",
+                        "dtype": str(A.dtype),
+                    },
+                )
+            )
+        print_benchmark_summary(records)
+        paths = save_benchmark_results(
+            records=records,
+            experiment="mat_log_reg",
+            seed=seed,
+            output_dir=results_dir,
+            device=device,
+        )
+        print(f"Saved benchmark results: {paths}")
+        return records
 
     def run_stochastic_optimizer(optimizer_cls, method='qdwh', lr=5e-2, steps=steps, batch_size=1000, scheduler=False):
         torch.manual_seed(seed)
@@ -78,9 +191,15 @@ def main(seed=42, steps=1500):
         if optimizer_cls == torch.optim.Adam:
             optimizer = optimizer_cls(model.parameters(), lr=lr)
         elif optimizer_cls == PolarGrad:
-            optimizer = optimizer_cls(model.parameters(), method=method, lr=lr, momentum=0.)
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr, momentum=0.,
+                inner_steps=5 if method == 'ns' else 2
+            )
         else:
-            optimizer = optimizer_cls(model.parameters(), method=method, lr=lr)
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr,
+                inner_steps=5 if method == 'ns' else 2
+            )
         if scheduler:
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=25, gamma=0.95)
         losses = []
@@ -101,6 +220,9 @@ def main(seed=42, steps=1500):
         nuc_norms_grad = smooth(nuc_norms_grad, weight=0.8)
         return losses, condition_numbers_grad, nuc_norms_grad
 
+    if benchmark_only:
+        run_benchmarks()
+        return
 
     # Compare optimizers
     loss_polar_grad, cond_grad_polar_grad, nuc_polar_grad = run_stochastic_optimizer(PolarGrad, method='qdwh', lr=2.5e-7)
@@ -165,6 +287,9 @@ def main(seed=42, steps=1500):
     plt.ylabel(r"$\lvert\kern-0.25ex\lvert\kern-0.25ex\lvert \nabla\mathsf{f}(X_k, \xi_k) \rvert\kern-0.25ex\rvert\kern-0.25ex\rvert_{\text{nuc}}$")
     fig2.savefig(f'fig/mat_log_reg_nuc_{seed}.pdf', dpi=500, bbox_inches='tight')
     plt.close(fig2)
+
+    if benchmark:
+        run_benchmarks()
 
 
 if __name__ == "__main__":

@@ -26,6 +26,13 @@ import torch.nn as nn
 
 from polar_grad import PolarGrad
 from muon import Muon_polar
+from benchmarking import (
+    print_benchmark_summary,
+    resolve_device,
+    run_training_benchmark,
+    save_benchmark_results,
+    seed_everything,
+)
 
 
 def smooth(scalars: np.array, weight: float = 0.9) -> np.array:  # Weight between 0 and 1
@@ -45,7 +52,8 @@ class LowRankModel(nn.Module):
         self.Y = nn.Parameter(torch.empty(n, r).uniform_(-1., 1.))
 
     def forward(self, target, mask):
-        mse_loss = torch.sum((self.X @ self.Y.T - target) ** 2) / mask.sum()
+        residual = mask * (self.X @ self.Y.T - target)
+        mse_loss = torch.sum(residual ** 2) / mask.sum()
         return mse_loss
 
 class LowRankModelAltGD(nn.Module):
@@ -78,10 +86,13 @@ class LowRankModelAltGD(nn.Module):
             mask: binary mask (m, n), 1 if observed, 0 if missing
         Returns:
             scalar loss        """
-        mse_loss = torch.sum((self.X @ self.Y.T - target) ** 2) / mask.sum()
+        residual = mask * (self.X @ self.Y.T - target)
+        mse_loss = torch.sum(residual ** 2) / mask.sum()
         return mse_loss
 
-    def alternating_gradient_step(self, target, mask, num_inner_steps=1):
+    def alternating_gradient_step(
+        self, target, mask, num_inner_steps=1, return_diagnostics=True
+    ):
         """Performs one step of masked alternating gradient descent."""
         # Update X while fixing Y
         for _ in range(num_inner_steps):
@@ -95,6 +106,8 @@ class LowRankModelAltGD(nn.Module):
             grad_Y = torch.autograd.grad(loss_Y, self.Y, retain_graph=False)[0]
             self.Y.data = self.Y.data - self.lr * grad_Y
         
+        if not return_diagnostics:
+            return loss_Y.detach()
         return torch.linalg.cond(grad_X), torch.linalg.cond(grad_Y), torch.linalg.matrix_norm(grad_X, ord='nuc'), torch.linalg.matrix_norm(grad_Y, ord='nuc')
 
     def fit(self, target, mask, steps=1000, num_inner_steps=1):
@@ -125,15 +138,18 @@ class LowRankModelAltGD(nn.Module):
         return losses, condition_numbers_grad_X, condition_numbers_grad_Y, nuc_norms_grad_X, nuc_norms_grad_Y
 
 
-def main(seed=42, steps=1000):
-    # Check device
-    # if torch.backends.mps.is_available():
-    #     device = torch.device("mps")
-    # elif torch.cuda.is_available():
-    #     device = torch.device("cuda")
-    # else:
-    #     device = torch.device("cpu")
-    device = torch.device("cpu")
+def main(
+    seed=42,
+    steps=1000,
+    device="cpu",
+    benchmark=False,
+    benchmark_only=False,
+    benchmark_steps=None,
+    benchmark_warmup=10,
+    benchmark_repeats=3,
+    results_dir="results",
+):
+    device = resolve_device(device)
     print(f"Using device: {device}")
 
     torch.manual_seed(seed)
@@ -145,6 +161,144 @@ def main(seed=42, steps=1000):
     # Observed entries mask (simulate missing data)
     mask = (torch.rand(m, n, device=device) < 0.3).float()
 
+    def make_optimizer(model, optimizer_cls, method, lr, use_scheduler):
+        inner_steps = 5 if method == "ns" else 2
+        if optimizer_cls == torch.optim.Adam:
+            optimizer = optimizer_cls(model.parameters(), lr=lr)
+        elif optimizer_cls == PolarGrad:
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr, momentum=0.,
+                inner_steps=inner_steps
+            )
+        else:
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr,
+                inner_steps=inner_steps
+            )
+        scheduler = None
+        if use_scheduler:
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=25, gamma=0.95
+            )
+        return optimizer, scheduler
+
+    def run_benchmarks():
+        measured_steps = int(benchmark_steps or steps)
+        configurations = [
+            ("PolarGrad (QDWH)", PolarGrad, "qdwh", 1.5e1, False),
+            ("PolarGrad (QDWH; lr decay)", PolarGrad, "qdwh", 1.5e1, True),
+            ("Muon (NS)", Muon_polar, "ns", 2.5e-1, False),
+            ("Muon (QDWH)", Muon_polar, "qdwh", 2.5e-1, False),
+            ("Muon (QDWH; lr decay)", Muon_polar, "qdwh", 2.5e-1, True),
+            ("Adam", torch.optim.Adam, None, 5e-2, False),
+            ("Adam (lr decay)", torch.optim.Adam, None, 5e-2, True),
+        ]
+        records = []
+        for name, optimizer_cls, method, lr, use_scheduler in configurations:
+            def setup_fn(run_seed, optimizer_cls=optimizer_cls, method=method,
+                         lr=lr, use_scheduler=use_scheduler):
+                seed_everything(run_seed, device)
+                model = LowRankModel(m, n, r).to(device)
+                optimizer, scheduler = make_optimizer(
+                    model, optimizer_cls, method, lr, use_scheduler
+                )
+                return {
+                    "model": model,
+                    "optimizer": optimizer,
+                    "scheduler": scheduler,
+                }
+
+            def step_fn(state, recorder):
+                if recorder is not None:
+                    recorder.start_step()
+                model = state["model"]
+                optimizer = state["optimizer"]
+                loss = model(M, mask)
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                if recorder is not None:
+                    recorder.start_optimizer()
+                optimizer.step()
+                if state["scheduler"] is not None:
+                    state["scheduler"].step()
+                if recorder is not None:
+                    recorder.end_step()
+                return loss
+
+            records.extend(
+                run_training_benchmark(
+                    name=name,
+                    setup_fn=setup_fn,
+                    step_fn=step_fn,
+                    seed=seed,
+                    steps=measured_steps,
+                    warmup_steps=int(benchmark_warmup),
+                    repeats=int(benchmark_repeats),
+                    device=device,
+                    metadata={
+                        "optimizer": optimizer_cls.__name__,
+                        "polar_method": method,
+                        "inner_steps": (
+                            5 if method == "ns" else
+                            2 if method == "qdwh" else None
+                        ),
+                        "learning_rate": lr,
+                        "lr_decay": use_scheduler,
+                        "factor_shapes": f"X:{m}x{r};Y:{n}x{r}",
+                        "observed_fraction": float(mask.mean().item()),
+                        "dtype": str(M.dtype),
+                    },
+                )
+            )
+
+        def setup_altgd(run_seed):
+            seed_everything(run_seed, device)
+            model = LowRankModelAltGD(m, n, r, lr=5e1).to(device)
+            return {"model": model, "optimizer": None}
+
+        def step_altgd(state, recorder):
+            if recorder is not None:
+                recorder.start_step()
+                recorder.start_optimizer()
+            loss = state["model"].alternating_gradient_step(
+                M, mask, num_inner_steps=1, return_diagnostics=False
+            )
+            if recorder is not None:
+                recorder.end_step()
+            return loss
+
+        records.extend(
+            run_training_benchmark(
+                name="AltGD",
+                setup_fn=setup_altgd,
+                step_fn=step_altgd,
+                seed=seed,
+                steps=measured_steps,
+                warmup_steps=int(benchmark_warmup),
+                repeats=int(benchmark_repeats),
+                device=device,
+                metadata={
+                    "optimizer": "AltGD",
+                    "polar_method": None,
+                    "learning_rate": 5e1,
+                    "lr_decay": False,
+                    "factor_shapes": f"X:{m}x{r};Y:{n}x{r}",
+                    "observed_fraction": float(mask.mean().item()),
+                    "dtype": str(M.dtype),
+                },
+            )
+        )
+        print_benchmark_summary(records)
+        paths = save_benchmark_results(
+            records=records,
+            experiment="low_rank_mat_comp",
+            seed=seed,
+            output_dir=results_dir,
+            device=device,
+        )
+        print(f"Saved benchmark results: {paths}")
+        return records
+
     # Training loop
     def train_lowrank(optimizer_cls, method='qdwh', lr=0.1, steps=steps, scheduler=False):
         torch.manual_seed(seed)
@@ -153,9 +307,15 @@ def main(seed=42, steps=1000):
         if optimizer_cls == torch.optim.Adam:
             optimizer = optimizer_cls(model.parameters(), lr=lr)
         elif optimizer_cls == PolarGrad:
-            optimizer = optimizer_cls(model.parameters(), method=method, lr=lr, momentum=0.)
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr, momentum=0.,
+                inner_steps=5 if method == 'ns' else 2
+            )
         else:
-            optimizer = optimizer_cls(model.parameters(), method=method, lr=lr)
+            optimizer = optimizer_cls(
+                model.parameters(), method=method, lr=lr,
+                inner_steps=5 if method == 'ns' else 2
+            )
         if scheduler:
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=25, gamma=0.95)
         losses = []
@@ -178,6 +338,9 @@ def main(seed=42, steps=1000):
         condition_numbers_grad_X = smooth(condition_numbers_grad_X)
         condition_numbers_grad_Y = smooth(condition_numbers_grad_Y)
         return losses, condition_numbers_grad_X, condition_numbers_grad_Y, nuc_norms_grad_X, nuc_norms_grad_Y
+    if benchmark_only:
+        run_benchmarks()
+        return
 
     # Compare optimizers
     loss_polar_grad_lr, cond_X_polar_grad_lr, cond_Y_polar_grad_lr, nuc_X_polar_grad_lr, nuc_Y_polar_grad_lr = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1)
@@ -302,6 +465,9 @@ def main(seed=42, steps=1000):
     fig2.subplots_adjust(bottom=0.15)
     fig2.savefig(f'fig/low_rank_mat_comp_3_{seed}.pdf', dpi=500, bbox_inches='tight')
     plt.close(fig2)
+
+    if benchmark:
+        run_benchmarks()
 
 
 if __name__ == "__main__":
