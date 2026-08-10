@@ -133,9 +133,10 @@ def polar(a: torch.Tensor,
     elif method == "polar_express":
         from polar_express import PolarExpress
         res = PolarExpress(arr, compute_hermitian=compute_hermitian, max_iterations=max_iterations)
-        unitary = res[0]
         if compute_hermitian:
-            posdef = res[1]
+            unitary, posdef = res
+        else:
+            unitary = res
     else:
         raise ValueError(f"Unknown polar decomposition method {method}.")
     
