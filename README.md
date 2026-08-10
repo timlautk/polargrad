@@ -93,86 +93,37 @@ nuclear-norm diagnostics from the timed region. This is important because those
 diagnostics can cost substantially more than the optimizer step. A throwaway
 warmup run absorbs lazy CUDA initialization and `torch.compile` overhead, while
 the measured run starts again from the same seed and model initialization.
-Commit the benchmark code before collecting final numbers. Publication runs
-refuse a dirty worktree by default, record a SHA-256 fingerprint of every Python
-source file, and maintain an output-directory manifest that prevents results
-from different commits, source trees, PyTorch builds, GPUs, or matmul-precision
-settings from being mixed accidentally. `--allow_dirty_git=True` and
-`--allow_mixed_runs=True` are development-only escape hatches.
-
-First run the numerical regression checks:
-
-```bash
-python validate_polar_oracles.py --device=cpu
-```
+Commit the benchmark code before collecting final numbers so the JSON metadata
+contains an immutable Git commit and reports a clean worktree.
 
 To run only the timing and memory measurements on a CUDA GPU:
 
 ```bash
-python mat_quad_reg.py --device=cuda --seed=42 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python mat_quad_reg.py --device=cuda --seed=142 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python mat_quad_reg.py --device=cuda --seed=242 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python mat_log_reg.py --device=cuda --seed=42 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python mat_log_reg.py --device=cuda --seed=142 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python mat_log_reg.py --device=cuda --seed=242 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python low_rank_mat_comp.py --device=cuda --seed=42 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python low_rank_mat_comp.py --device=cuda --seed=142 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
-python low_rank_mat_comp.py --device=cuda --seed=242 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_corrected
+python mat_quad_reg.py --device=cuda --benchmark_only=True --benchmark_repeats=3
+python mat_log_reg.py --device=cuda --benchmark_only=True --benchmark_repeats=3
+python low_rank_mat_comp.py --device=cuda --benchmark_only=True --benchmark_repeats=3
 ```
 
 Use `--benchmark=True` instead of `--benchmark_only=True` to generate the
 original iteration-based figures first and then run the independent benchmark.
 By default, the benchmark measures the same number of steps as the experiment.
 For a short validation run, pass (for example) `--benchmark_steps=100`. The
-options `--benchmark_warmup`, `--benchmark_repeats`,
-`--benchmark_trace_every`, and `--results_dir` control the warmup length,
-number of fresh timing repeats, independent convergence-trace interval, and
-output directory.
+options `--benchmark_warmup`, `--benchmark_repeats`, and `--results_dir` control
+the warmup length, number of fresh repeats, and output directory.
 
-For targeted development or hardware profiling, `--benchmark_filter` accepts
-a comma-separated list of stable method identifiers. For example,
-`--benchmark_filter=polargrad_qdwh_lr_decay` runs only decayed QDWH PolarGrad.
-An invalid identifier prints all available choices. Passing
-`--benchmark_nvtx=True` places only each measured repetition inside an NVTX
-range of the form
-`training/<experiment>/<method_identifier>/repeat=<index>`; warmup, final
-metrics, and convergence diagnostics remain outside the range. Use
-`--benchmark_trace_every=0` while profiling so no separate trace is collected.
-
-Each script writes JSON, per-repeat CSV, summary CSV, and convergence-trace CSV
-files. Final objectives are evaluated after the last update and outside the
-timed region. Quadratic regression also records the exact objective gap;
-logistic regression records a deterministic full-data objective rather than the
-last random mini-batch. The separate trace makes fixed-objective threshold
-comparisons possible without inserting loss synchronizations into the timed
-repetitions.
-
-Matrix completion additionally records observed-entry loss, unobserved-entry
-loss, full-matrix mean squared error, and relative Frobenius reconstruction
-error. The observed-entry loss remains available as `final_loss` for backward
-compatibility. The unobserved and full-matrix metrics measure recovery rather
-than merely fitting the entries used for optimization.
-
-After all seeds finish, validate and aggregate the runs with:
-
-```bash
-python summarize_benchmark_runs.py --results-dir=results_corrected
-```
-
-Optional time-to-threshold summaries can be generated from the independent
-traces, for example with
-`--threshold=mat_quad_reg:objective_gap:1e-2`. The reported wall time is the
-threshold-crossing step multiplied by the median step time from the independent
-timing repetitions and is therefore labeled as an estimate.
-
-The timing records include total wall time, time per step, steps per second,
-median sampled forward/backward and optimizer times, optimizer-state size,
-baseline CUDA allocation, and peak allocated/reserved CUDA memory. The
-estimated temporary workspace is the incremental peak minus the final
-optimizer-state tensor size and remains allocator-dependent. The field
-`cuda_stream_span_fraction_pct` is only the duration of the measured CUDA
-stream span divided by wall time. It is not GPU utilization, SM occupancy, or
-achieved FLOP efficiency and must not be reported as "GPU efficiency."
+Each script writes a JSON record, per-repeat CSV, and summary CSV. The records
+include total wall-clock time, time per step, steps per second, forward/backward
+and optimizer device time, optimizer-state size, baseline CUDA allocation, and
+peak allocated/reserved CUDA memory. The estimated temporary workspace is the
+incremental peak minus the final optimizer-state tensor size; it should be
+treated as an approximation because caching allocators can reuse storage.
+To keep event instrumentation from dominating these small workloads, component
+times are sampled every ten steps and their sampling interval is stored in the
+output. `device_activity_pct` is the estimated fraction of
+wall time covered by CUDA-event intervals. It is a timing-based activity proxy,
+not SM occupancy or achieved FLOP efficiency; the saved system metadata should
+always accompany reported numbers. CPU runs report timing but leave CUDA-memory
+fields at zero.
 
 The polar-oracle microbenchmark compares fixed inner-iteration budgets while
 also reporting orthogonality, reconstruction, and optional exact-direction
@@ -187,63 +138,13 @@ python benchmark_polar_oracles.py \
   --inner-steps=2,5 \
   --condition-number=1e6 \
   --compute-reference \
-  --matmul-precision=highest \
-  --repeats=3 \
-  --output-dir=results_corrected/oracles
+  --repeats=3
 ```
 
-The oracle residuals are evaluated in float64 and include orthogonality,
-Hermitian symmetry, positive-semidefiniteness, reconstruction with a
-symmetrized Hermitian factor, the polar-objective gap, and (for full-rank
-matrices) direction error against a float64 SVD. Direction error is intentionally
-omitted for rank-deficient inputs because the polar factor is nonunique on the
-null space.
-
-Add `--profile` to save PyTorch Chrome traces. For publication-quality hardware
-utilization, run one representative configuration at a time under NVIDIA
-Nsight Compute. `--nvtx` annotates only the measured call block. For example:
-
-```bash
-ncu --target-processes all --nvtx --nvtx-include "polar/polar_express/steps=5/4096x1024/gaussian/" --metrics gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed --export results_corrected/ncu_polar_express_4096x1024 python benchmark_polar_oracles.py --device=cuda --shapes=4096x1024 --methods=polar_express --spectra=gaussian --inner-steps=5 --calls=20 --warmup-calls=5 --repeats=1 --compute-reference --nvtx --output-dir=results_corrected/ncu_polar_express
-```
-
-Report duration-weighted SM-throughput and DRAM-throughput percentages and
-state their Nsight metric names explicitly. They should not be inferred from
-CUDA event timing.
-
-End-to-end training ranges can be profiled in the same way. A representative
-quadratic-regression command is:
-
-```bash
-ncu --target-processes all --nvtx --nvtx-include "training/mat_quad_reg/polargrad_qdwh_lr_decay/repeat=0/" --metrics gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed --export results_additional/ncu_mat_quad_polargrad_qdwh_decay --force-overwrite python mat_quad_reg.py --device=cuda --seed=42 --benchmark_only=True --benchmark_steps=50 --benchmark_warmup=10 --benchmark_repeats=1 --benchmark_trace_every=0 --benchmark_filter=polargrad_qdwh_lr_decay --benchmark_nvtx=True --results_dir=results_additional/mat_quad_polargrad_qdwh_decay
-```
-
-Use a fresh results directory after modifying the benchmark source. The schema
-and source-hash checks intentionally reject attempts to append new records to
-an older results directory.
-
-The complete set of representative end-to-end and oracle Nsight Compute runs
-is available as a script:
-
-```bash
-./run_additional_benchmarks.sh training
-./run_additional_benchmarks.sh oracles
-# Or run both groups:
-./run_additional_benchmarks.sh all
-```
-
-By default, `.ncu-rep` files are saved under `results_additional/ncu`. Set
-`POLARGRAD_PROFILE_ROOT` to choose another root directory.
-
-If only the new matrix-recovery metrics are needed, rerun the three completion
-seeds in their own clean directory and aggregate only that experiment:
-
-```bash
-python low_rank_mat_comp.py --device=cuda --seed=42 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_recovery_v2_1
-python low_rank_mat_comp.py --device=cuda --seed=142 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_recovery_v2_1
-python low_rank_mat_comp.py --device=cuda --seed=242 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_recovery_v2_1
-python summarize_benchmark_runs.py --results-dir=results_recovery_v2_1 --expected-experiments=low_rank_mat_comp
-```
+Add `--profile` to save PyTorch Chrome traces for kernel-level inspection. For
+publication-quality hardware utilization (for example, SM and DRAM throughput),
+run the same microbenchmark under NVIDIA Nsight Compute or Nsight Systems and
+report those profiler metrics separately from `device_activity_pct`.
 
 Reproducibility corrections made with this benchmark update:
 
@@ -251,20 +152,10 @@ Reproducibility corrections made with this benchmark update:
   explicitly: two QDWH steps and five Newton--Schulz steps. Previously,
   `Muon_polar` silently used its default of five steps for QDWH.
 - Matrix logistic regression now generates `C` by thresholding standard
-  Gaussian samples at `0.5` and encoding the two classes as `-1` and `+1`, as
-  required by the stated loss `softplus(-C * logits)`. The former `0/1`
-  encoding made every zero-labeled entry contribute a constant with zero
-  gradient.
+  Gaussian samples at `0.5`, as stated in the experimental details.
 - Low-rank matrix completion now applies the observation mask to the residual
   in both the joint optimizer and AltGD objectives. Previously, the mask was
   generated but used only in the denominator.
-- QDWH and ZOLO-PD now compute Hermitian right solves with
-  `torch.cholesky_solve`. The previous QDWH code treated an adjoint Cholesky
-  factor as lower triangular, and the previous ZOLO-PD code obtained a lower
-  Cholesky factor but solved as though it were upper triangular.
-- Polar Express and Newton--Schulz now validate one-dimensional inputs before
-  using `.mT`, and their optional Hermitian-factor calculation works for both
-  tall and wide matrices.
 
 
 ## Citation

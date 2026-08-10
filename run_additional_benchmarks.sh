@@ -11,31 +11,53 @@ profile_training() {
     local script=$1
     local experiment=$2
     local method_id=$3
-    local range="training/${experiment}/${method_id}/repeat=0/"
-    local report="${profile_root}/ncu/${experiment}_${method_id}"
+    local range="training__${experiment}__${method_id}__repeat_0/"
+    local report="${profile_root}/ncu/${experiment}_${method_id}.ncu-rep"
+    local csv="${profile_root}/ncu/${experiment}_${method_id}.csv"
+    local log="${profile_root}/ncu/${experiment}_${method_id}.console.log"
     local results="${profile_root}/profile_runs/${experiment}_${method_id}"
-    ncu --target-processes all --nvtx --nvtx-include "${range}" \
+    if ! ncu --target-processes all --nvtx --nvtx-include "${range}" \
         --metrics "${metrics}" --export "${report}" --force-overwrite \
+        --page raw --csv --log-file "${csv}" \
         python "${script}" --device=cuda --seed=42 --benchmark_only=True \
-        --benchmark_steps=50 --benchmark_warmup=10 --benchmark_repeats=1 \
+        --benchmark_steps=1 --benchmark_warmup=10 --benchmark_repeats=1 \
         --benchmark_trace_every=0 --benchmark_filter="${method_id}" \
-        --benchmark_nvtx=True --results_dir="${results}"
+        --benchmark_nvtx=True --results_dir="${results}" 2>&1 | tee "${log}"
+    then
+        echo "Nsight Compute failed; inspect ${log}." >&2
+        return 1
+    fi
+    if [[ ! -s "${report}" ]]; then
+        echo "No report was created; inspect ${log} and ${csv}." >&2
+        return 1
+    fi
 }
 
 profile_oracle() {
     local method=$1
     local steps=$2
     local method_tag=${method//-/_}
-    local range="polar/${method}/steps=${steps}/4096x1024/gaussian/"
-    local report="${profile_root}/ncu/oracle_${method_tag}_steps${steps}"
+    local range="polar__${method_tag}__steps_${steps}__shape_4096x1024__gaussian/"
+    local report="${profile_root}/ncu/oracle_${method_tag}_steps${steps}.ncu-rep"
+    local csv="${profile_root}/ncu/oracle_${method_tag}_steps${steps}.csv"
+    local log="${profile_root}/ncu/oracle_${method_tag}_steps${steps}.console.log"
     local results="${profile_root}/profile_runs/oracle_${method_tag}_steps${steps}"
-    ncu --target-processes all --nvtx --nvtx-include "${range}" \
+    if ! ncu --target-processes all --nvtx --nvtx-include "${range}" \
         --metrics "${metrics}" --export "${report}" --force-overwrite \
+        --page raw --csv --log-file "${csv}" \
         python benchmark_polar_oracles.py --device=cuda \
         --shapes=4096x1024 --methods="${method}" --spectra=gaussian \
-        --inner-steps="${steps}" --calls=20 --warmup-calls=5 --repeats=1 \
+        --inner-steps="${steps}" --calls=1 --warmup-calls=5 --repeats=1 \
         --compute-reference --matmul-precision=highest --nvtx \
-        --output-dir="${results}"
+        --output-dir="${results}" 2>&1 | tee "${log}"
+    then
+        echo "Nsight Compute failed; inspect ${log}." >&2
+        return 1
+    fi
+    if [[ ! -s "${report}" ]]; then
+        echo "No report was created; inspect ${log} and ${csv}." >&2
+        return 1
+    fi
 }
 
 run_training_profiles() {
