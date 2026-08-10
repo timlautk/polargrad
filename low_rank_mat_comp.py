@@ -202,8 +202,8 @@ def main(
         )
         measured_steps = int(benchmark_steps or steps)
         configurations = [
-            ("PolarGrad (QDWH)", PolarGrad, "qdwh", 1.5e1, False),
-            ("PolarGrad (QDWH; lr decay)", PolarGrad, "qdwh", 1.5e1, True),
+            ("PolarGrad (QDWH)", PolarGrad, "qdwh", 5e1, False),
+            ("PolarGrad (QDWH; lr decay)", PolarGrad, "qdwh", 5e1, True),
             ("Muon (NS)", Muon_polar, "ns", 2.5e-1, False),
             ("Muon (QDWH)", Muon_polar, "qdwh", 2.5e-1, False),
             ("Muon (QDWH; lr decay)", Muon_polar, "qdwh", 2.5e-1, True),
@@ -403,8 +403,8 @@ def main(
         return
 
     # Compare optimizers
-    loss_polar_grad_lr, cond_X_polar_grad_lr, cond_Y_polar_grad_lr, nuc_X_polar_grad_lr, nuc_Y_polar_grad_lr = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1)
-    loss_polar_grad_lr_decay, cond_X_polar_grad_lr_decay, cond_Y_polar_grad_lr_decay, nuc_X_polar_grad_lr_decay, nuc_Y_polar_grad_lr_decay = train_lowrank(PolarGrad, method='qdwh', lr=1.5e1, scheduler=True)
+    loss_polar_grad_lr, cond_X_polar_grad_lr, cond_Y_polar_grad_lr, nuc_X_polar_grad_lr, nuc_Y_polar_grad_lr = train_lowrank(PolarGrad, method='qdwh', lr=5e1)
+    loss_polar_grad_lr_decay, cond_X_polar_grad_lr_decay, cond_Y_polar_grad_lr_decay, nuc_X_polar_grad_lr_decay, nuc_Y_polar_grad_lr_decay = train_lowrank(PolarGrad, method='qdwh', lr=5e1, scheduler=True)
     loss_muon_qdwh_lr, cond_X_muon_qdwh_lr, cond_Y_muon_qdwh_lr, nuc_X_muon_qdwh_lr, nuc_Y_muon_qdwh_lr  = train_lowrank(Muon_polar, method='qdwh', lr=2.5e-1) # 5e-1
     loss_muon_qdwh_lr_decay, cond_X_muon_qdwh_lr_decay, cond_Y_muon_qdwh_lr_decay, nuc_X_muon_qdwh_lr_decay, nuc_Y_muon_qdwh_lr_decay = train_lowrank(Muon_polar, method='qdwh', lr=2.5e-1, scheduler=True)
     loss_muon_ns_lr, cond_X_muon_ns_lr, cond_Y_muon_ns_lr, nuc_X_muon_ns_lr, nuc_Y_muon_ns_lr  = train_lowrank(Muon_polar, method='ns', lr=2.5e-1)
