@@ -164,3 +164,6 @@ cython_debug/
 
 # Figures
 fig/
+
+# Results
+results/
