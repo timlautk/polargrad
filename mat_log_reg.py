@@ -36,6 +36,7 @@ from benchmarking import (
     run_convergence_trace,
     run_training_benchmark,
     save_benchmark_results,
+    select_benchmark_names,
     seed_everything,
 )
 
@@ -69,6 +70,8 @@ def main(
     benchmark_warmup=10,
     benchmark_repeats=3,
     benchmark_trace_every=10,
+    benchmark_filter="",
+    benchmark_nvtx=False,
     results_dir="results",
     matmul_precision="high",
     allow_dirty_git=False,
@@ -132,6 +135,15 @@ def main(
             ("Adam", torch.optim.Adam, None, 5e-3, False),
             ("Adam (lr decay)", torch.optim.Adam, None, 1e-2, True),
         ]
+        selected_names = select_benchmark_names(
+            [configuration[0] for configuration in configurations],
+            benchmark_filter,
+        )
+        configurations = [
+            configuration
+            for configuration in configurations
+            if configuration[0] in selected_names
+        ]
         records = []
         traces = []
         for name, optimizer_cls, method, lr, use_scheduler in configurations:
@@ -183,6 +195,8 @@ def main(
                     repeats=int(benchmark_repeats),
                     device=device,
                     final_metrics_fn=final_metrics_fn,
+                    nvtx=bool(benchmark_nvtx),
+                    nvtx_prefix="training/mat_log_reg",
                     metadata={
                         "optimizer": optimizer_cls.__name__,
                         "polar_method": method,

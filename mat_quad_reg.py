@@ -35,6 +35,7 @@ from benchmarking import (
     run_convergence_trace,
     run_training_benchmark,
     save_benchmark_results,
+    select_benchmark_names,
     seed_everything,
 )
 
@@ -96,6 +97,8 @@ def main(
     benchmark_warmup=10,
     benchmark_repeats=3,
     benchmark_trace_every=10,
+    benchmark_filter="",
+    benchmark_nvtx=False,
     results_dir="results",
     matmul_precision="high",
     allow_dirty_git=False,
@@ -181,6 +184,17 @@ def main(
             ("Adam", torch.optim.Adam, None, 5e-2, False),
             ("Adam (lr decay)", torch.optim.Adam, None, 5e-2, True),
         ]
+        newton_name = "Newton (inverse Hessian)"
+        selected_names = select_benchmark_names(
+            [configuration[0] for configuration in configurations]
+            + [newton_name],
+            benchmark_filter,
+        )
+        configurations = [
+            configuration
+            for configuration in configurations
+            if configuration[0] in selected_names
+        ]
         records = []
         traces = []
         for name, optimizer_cls, method, lr, use_scheduler in configurations:
@@ -236,6 +250,8 @@ def main(
                     repeats=int(benchmark_repeats),
                     device=device,
                     final_metrics_fn=final_metrics_fn,
+                    nvtx=bool(benchmark_nvtx),
+                    nvtx_prefix="training/mat_quad_reg",
                     metadata={
                         "optimizer": optimizer_cls.__name__,
                         "polar_method": method,
@@ -308,45 +324,48 @@ def main(
                 "objective_gap": final_loss - optimal_loss,
             }
 
-        newton_records = run_training_benchmark(
-                name="Newton (inverse Hessian)",
-                setup_fn=setup_newton,
-                step_fn=step_newton,
-                seed=seed,
-                steps=measured_steps,
-                warmup_steps=int(benchmark_warmup),
-                repeats=int(benchmark_repeats),
-                device=device,
-                final_metrics_fn=final_newton_metrics,
-                metadata={
-                    "optimizer": "inverse_hessian",
-                    "polar_method": None,
-                    "learning_rate": 2.5e-1,
-                    "lr_decay": False,
-                    "matrix_shape": f"{m}x{n}",
-                    "data_shapes": f"A:{p}x{m};B:{n}x{q};C:{p}x{q}",
-                    "dtype": str(A.dtype),
-                    "optimal_loss": optimal_loss,
-                },
-            )
-        records.extend(newton_records)
-        traces.extend(
-            run_convergence_trace(
-                name="Newton (inverse Hessian)",
-                setup_fn=setup_newton,
-                step_fn=step_newton,
-                metrics_fn=final_newton_metrics,
-                seed=seed,
-                steps=measured_steps,
-                checkpoint_every=int(benchmark_trace_every),
-                warmup_steps=int(benchmark_warmup),
-                device=device,
-                estimated_step_time_s=statistics.median(
-                    record["step_time_ms"] for record in newton_records
+        if newton_name in selected_names:
+            newton_records = run_training_benchmark(
+                    name=newton_name,
+                    setup_fn=setup_newton,
+                    step_fn=step_newton,
+                    seed=seed,
+                    steps=measured_steps,
+                    warmup_steps=int(benchmark_warmup),
+                    repeats=int(benchmark_repeats),
+                    device=device,
+                    final_metrics_fn=final_newton_metrics,
+                    nvtx=bool(benchmark_nvtx),
+                    nvtx_prefix="training/mat_quad_reg",
+                    metadata={
+                        "optimizer": "inverse_hessian",
+                        "polar_method": None,
+                        "learning_rate": 2.5e-1,
+                        "lr_decay": False,
+                        "matrix_shape": f"{m}x{n}",
+                        "data_shapes": f"A:{p}x{m};B:{n}x{q};C:{p}x{q}",
+                        "dtype": str(A.dtype),
+                        "optimal_loss": optimal_loss,
+                    },
                 )
-                / 1000.0,
+            records.extend(newton_records)
+            traces.extend(
+                run_convergence_trace(
+                    name=newton_name,
+                    setup_fn=setup_newton,
+                    step_fn=step_newton,
+                    metrics_fn=final_newton_metrics,
+                    seed=seed,
+                    steps=measured_steps,
+                    checkpoint_every=int(benchmark_trace_every),
+                    warmup_steps=int(benchmark_warmup),
+                    device=device,
+                    estimated_step_time_s=statistics.median(
+                        record["step_time_ms"] for record in newton_records
+                    )
+                    / 1000.0,
+                )
             )
-        )
         print_benchmark_summary(records)
         paths = save_benchmark_results(
             records=records,

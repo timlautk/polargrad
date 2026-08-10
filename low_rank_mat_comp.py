@@ -35,6 +35,7 @@ from benchmarking import (
     run_convergence_trace,
     run_training_benchmark,
     save_benchmark_results,
+    select_benchmark_names,
     seed_everything,
 )
 
@@ -152,6 +153,8 @@ def main(
     benchmark_warmup=10,
     benchmark_repeats=3,
     benchmark_trace_every=10,
+    benchmark_filter="",
+    benchmark_nvtx=False,
     results_dir="results",
     matmul_precision="high",
     allow_dirty_git=False,
@@ -171,6 +174,28 @@ def main(
 
     # Observed entries mask (simulate missing data)
     mask = (torch.rand(m, n, device=device) < 0.3).float()
+    unobserved_mask = 1.0 - mask
+
+    def completion_metrics(model):
+        """Evaluate fitting and recovery without changing the timed workload."""
+        residual = model.X @ model.Y.T - M
+        squared_error = residual.square()
+        observed_loss = (mask * squared_error).sum() / mask.sum()
+        unobserved_loss = (
+            (unobserved_mask * squared_error).sum() / unobserved_mask.sum()
+        )
+        full_mse = squared_error.mean()
+        full_relative_error = torch.linalg.matrix_norm(
+            residual
+        ) / torch.linalg.matrix_norm(M).clamp_min(torch.finfo(M.dtype).eps)
+        return {
+            # Preserve the original field name for plotting and aggregation.
+            "final_loss": observed_loss,
+            "observed_loss": observed_loss,
+            "unobserved_loss": unobserved_loss,
+            "full_mse": full_mse,
+            "full_relative_reconstruction_error": full_relative_error,
+        }
 
     def make_optimizer(model, optimizer_cls, method, lr, use_scheduler):
         inner_steps = 5 if method == "ns" else 2
@@ -210,6 +235,17 @@ def main(
             ("Adam", torch.optim.Adam, None, 5e-2, False),
             ("Adam (lr decay)", torch.optim.Adam, None, 5e-2, True),
         ]
+        altgd_name = "AltGD"
+        selected_names = select_benchmark_names(
+            [configuration[0] for configuration in configurations]
+            + [altgd_name],
+            benchmark_filter,
+        )
+        configurations = [
+            configuration
+            for configuration in configurations
+            if configuration[0] in selected_names
+        ]
         records = []
         traces = []
         for name, optimizer_cls, method, lr, use_scheduler in configurations:
@@ -244,7 +280,7 @@ def main(
                 return loss
 
             def final_metrics_fn(state):
-                return {"final_loss": state["model"](M, mask)}
+                return completion_metrics(state["model"])
 
             configuration_records = run_training_benchmark(
                     name=name,
@@ -256,6 +292,8 @@ def main(
                     repeats=int(benchmark_repeats),
                     device=device,
                     final_metrics_fn=final_metrics_fn,
+                    nvtx=bool(benchmark_nvtx),
+                    nvtx_prefix="training/low_rank_mat_comp",
                     metadata={
                         "optimizer": optimizer_cls.__name__,
                         "polar_method": method,
@@ -306,46 +344,49 @@ def main(
             return loss
 
         def final_altgd_metrics(state):
-            return {"final_loss": state["model"].loss(M, mask)}
+            return completion_metrics(state["model"])
 
-        altgd_records = run_training_benchmark(
-                name="AltGD",
-                setup_fn=setup_altgd,
-                step_fn=step_altgd,
-                seed=seed,
-                steps=measured_steps,
-                warmup_steps=int(benchmark_warmup),
-                repeats=int(benchmark_repeats),
-                device=device,
-                final_metrics_fn=final_altgd_metrics,
-                metadata={
-                    "optimizer": "AltGD",
-                    "polar_method": None,
-                    "learning_rate": 5e1,
-                    "lr_decay": False,
-                    "factor_shapes": f"X:{m}x{r};Y:{n}x{r}",
-                    "observed_fraction": float(mask.mean().item()),
-                    "dtype": str(M.dtype),
-                },
-            )
-        records.extend(altgd_records)
-        traces.extend(
-            run_convergence_trace(
-                name="AltGD",
-                setup_fn=setup_altgd,
-                step_fn=step_altgd,
-                metrics_fn=final_altgd_metrics,
-                seed=seed,
-                steps=measured_steps,
-                checkpoint_every=int(benchmark_trace_every),
-                warmup_steps=int(benchmark_warmup),
-                device=device,
-                estimated_step_time_s=statistics.median(
-                    record["step_time_ms"] for record in altgd_records
+        if altgd_name in selected_names:
+            altgd_records = run_training_benchmark(
+                    name=altgd_name,
+                    setup_fn=setup_altgd,
+                    step_fn=step_altgd,
+                    seed=seed,
+                    steps=measured_steps,
+                    warmup_steps=int(benchmark_warmup),
+                    repeats=int(benchmark_repeats),
+                    device=device,
+                    final_metrics_fn=final_altgd_metrics,
+                    nvtx=bool(benchmark_nvtx),
+                    nvtx_prefix="training/low_rank_mat_comp",
+                    metadata={
+                        "optimizer": "AltGD",
+                        "polar_method": None,
+                        "learning_rate": 5e1,
+                        "lr_decay": False,
+                        "factor_shapes": f"X:{m}x{r};Y:{n}x{r}",
+                        "observed_fraction": float(mask.mean().item()),
+                        "dtype": str(M.dtype),
+                    },
                 )
-                / 1000.0,
+            records.extend(altgd_records)
+            traces.extend(
+                run_convergence_trace(
+                    name=altgd_name,
+                    setup_fn=setup_altgd,
+                    step_fn=step_altgd,
+                    metrics_fn=final_altgd_metrics,
+                    seed=seed,
+                    steps=measured_steps,
+                    checkpoint_every=int(benchmark_trace_every),
+                    warmup_steps=int(benchmark_warmup),
+                    device=device,
+                    estimated_step_time_s=statistics.median(
+                        record["step_time_ms"] for record in altgd_records
+                    )
+                    / 1000.0,
+                )
             )
-        )
         print_benchmark_summary(records)
         paths = save_benchmark_results(
             records=records,

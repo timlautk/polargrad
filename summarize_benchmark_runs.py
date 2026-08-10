@@ -92,6 +92,10 @@ def aggregate_records(runs, expected_seeds, expected_repeats):
         "final_loss",
         "final_loss_per_entry",
         "objective_gap",
+        "observed_loss",
+        "unobserved_loss",
+        "full_mse",
+        "full_relative_reconstruction_error",
     )
     summaries = []
     for (experiment, name), observations in sorted(groups.items()):

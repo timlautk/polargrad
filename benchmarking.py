@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -40,7 +41,7 @@ import torch
 
 
 MIB = 1024**2
-BENCHMARK_SCHEMA_VERSION = "2.0"
+BENCHMARK_SCHEMA_VERSION = "2.1"
 
 
 def _repository_root() -> Path:
@@ -111,6 +112,39 @@ def seed_everything(seed: int, device: torch.device) -> None:
     torch.manual_seed(seed)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
+
+
+def benchmark_name_slug(name: str) -> str:
+    """Return a stable command-line and NVTX identifier for a method name."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    if not slug:
+        raise ValueError(f"Could not construct a benchmark identifier from {name!r}.")
+    return slug
+
+
+def select_benchmark_names(
+    available_names: Iterable[str], selector: Optional[str]
+) -> set[str]:
+    """Resolve a comma-separated list of method names or stable identifiers."""
+    names = list(available_names)
+    by_slug = {benchmark_name_slug(name): name for name in names}
+    if len(by_slug) != len(names):
+        raise ValueError("Benchmark method names must have unique stable identifiers.")
+    if selector is None or not str(selector).strip():
+        return set(names)
+    requested = {
+        benchmark_name_slug(item)
+        for item in str(selector).split(",")
+        if item.strip()
+    }
+    unknown = sorted(requested - set(by_slug))
+    if unknown:
+        choices = ", ".join(sorted(by_slug))
+        raise ValueError(
+            f"Unknown benchmark method identifiers: {', '.join(unknown)}. "
+            f"Available identifiers are: {choices}."
+        )
+    return {by_slug[item] for item in requested}
 
 
 def synchronize(device: torch.device) -> None:
@@ -392,6 +426,8 @@ def run_training_benchmark(
     final_metrics_fn: Optional[
         Callable[[Mapping[str, Any]], Mapping[str, Any]]
     ] = None,
+    nvtx: bool = False,
+    nvtx_prefix: str = "training",
 ) -> List[Dict[str, Any]]:
     """Run fresh warmup and measured workloads with identical initialization."""
     if steps <= 0:
@@ -400,6 +436,8 @@ def run_training_benchmark(
         raise ValueError("warmup_steps must be nonnegative")
     if repeats <= 0:
         raise ValueError("repeats must be positive")
+    if nvtx and device.type != "cuda":
+        raise ValueError("NVTX profiling requires a CUDA device.")
 
     records = []
     for repeat in range(repeats):
@@ -422,16 +460,28 @@ def run_training_benchmark(
             device=device,
             metadata=benchmark_metadata,
         )
-        recorder.start()
-        last_output = None
-        for _ in range(steps):
-            last_output = step_fn(state, recorder)
-        if last_output is None:
-            raise RuntimeError("The benchmark workload did not execute any steps.")
-        record = recorder.finish(
-            model=state.get("model"),
-            optimizer=state.get("optimizer"),
+        range_label = (
+            f"{str(nvtx_prefix).strip('/')}/{benchmark_name_slug(name)}/"
+            f"repeat={repeat}"
         )
+        recorder.start()
+        if nvtx:
+            torch.cuda.nvtx.range_push(range_label)
+        try:
+            last_output = None
+            for _ in range(steps):
+                last_output = step_fn(state, recorder)
+            if last_output is None:
+                raise RuntimeError("The benchmark workload did not execute any steps.")
+            record = recorder.finish(
+                model=state.get("model"),
+                optimizer=state.get("optimizer"),
+            )
+        finally:
+            if nvtx:
+                torch.cuda.nvtx.range_pop()
+        if nvtx:
+            record["nvtx_range"] = range_label
         if final_metrics_fn is not None:
             with torch.no_grad():
                 final_metrics = final_metrics_fn(state)
@@ -623,7 +673,14 @@ def summarize_records(records: Iterable[Mapping[str, Any]]) -> List[Dict[str, An
                 summary[f"{metric}_mean"] = statistics.fmean(values)
                 summary[f"{metric}_median"] = statistics.median(values)
                 summary[f"{metric}_std"] = statistics.pstdev(values)
-        for metric in ("final_loss_per_entry", "objective_gap"):
+        for metric in (
+            "final_loss_per_entry",
+            "objective_gap",
+            "observed_loss",
+            "unobserved_loss",
+            "full_mse",
+            "full_relative_reconstruction_error",
+        ):
             values = [
                 float(record[metric])
                 for record in group

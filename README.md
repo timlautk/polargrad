@@ -129,6 +129,16 @@ options `--benchmark_warmup`, `--benchmark_repeats`,
 number of fresh timing repeats, independent convergence-trace interval, and
 output directory.
 
+For targeted development or hardware profiling, `--benchmark_filter` accepts
+a comma-separated list of stable method identifiers. For example,
+`--benchmark_filter=polargrad_qdwh_lr_decay` runs only decayed QDWH PolarGrad.
+An invalid identifier prints all available choices. Passing
+`--benchmark_nvtx=True` places only each measured repetition inside an NVTX
+range of the form
+`training/<experiment>/<method_identifier>/repeat=<index>`; warmup, final
+metrics, and convergence diagnostics remain outside the range. Use
+`--benchmark_trace_every=0` while profiling so no separate trace is collected.
+
 Each script writes JSON, per-repeat CSV, summary CSV, and convergence-trace CSV
 files. Final objectives are evaluated after the last update and outside the
 timed region. Quadratic regression also records the exact objective gap;
@@ -136,6 +146,12 @@ logistic regression records a deterministic full-data objective rather than the
 last random mini-batch. The separate trace makes fixed-objective threshold
 comparisons possible without inserting loss synchronizations into the timed
 repetitions.
+
+Matrix completion additionally records observed-entry loss, unobserved-entry
+loss, full-matrix mean squared error, and relative Frobenius reconstruction
+error. The observed-entry loss remains available as `final_loss` for backward
+compatibility. The unobserved and full-matrix metrics measure recovery rather
+than merely fitting the entries used for optimization.
 
 After all seeds finish, validate and aggregate the runs with:
 
@@ -194,6 +210,40 @@ ncu --target-processes all --nvtx --nvtx-include "polar/polar_express/steps=5/40
 Report duration-weighted SM-throughput and DRAM-throughput percentages and
 state their Nsight metric names explicitly. They should not be inferred from
 CUDA event timing.
+
+End-to-end training ranges can be profiled in the same way. A representative
+quadratic-regression command is:
+
+```bash
+ncu --target-processes all --nvtx --nvtx-include "training/mat_quad_reg/polargrad_qdwh_lr_decay/repeat=0/" --metrics gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed --export results_additional/ncu_mat_quad_polargrad_qdwh_decay --force-overwrite python mat_quad_reg.py --device=cuda --seed=42 --benchmark_only=True --benchmark_steps=50 --benchmark_warmup=10 --benchmark_repeats=1 --benchmark_trace_every=0 --benchmark_filter=polargrad_qdwh_lr_decay --benchmark_nvtx=True --results_dir=results_additional/mat_quad_polargrad_qdwh_decay
+```
+
+Use a fresh results directory after modifying the benchmark source. The schema
+and source-hash checks intentionally reject attempts to append new records to
+an older results directory.
+
+The complete set of representative end-to-end and oracle Nsight Compute runs
+is available as a script:
+
+```bash
+./run_additional_benchmarks.sh training
+./run_additional_benchmarks.sh oracles
+# Or run both groups:
+./run_additional_benchmarks.sh all
+```
+
+By default, `.ncu-rep` files are saved under `results_additional/ncu`. Set
+`POLARGRAD_PROFILE_ROOT` to choose another root directory.
+
+If only the new matrix-recovery metrics are needed, rerun the three completion
+seeds in their own clean directory and aggregate only that experiment:
+
+```bash
+python low_rank_mat_comp.py --device=cuda --seed=42 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_recovery_v2_1
+python low_rank_mat_comp.py --device=cuda --seed=142 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_recovery_v2_1
+python low_rank_mat_comp.py --device=cuda --seed=242 --benchmark_only=True --benchmark_repeats=3 --benchmark_trace_every=10 --results_dir=results_recovery_v2_1
+python summarize_benchmark_runs.py --results-dir=results_recovery_v2_1 --expected-experiments=low_rank_mat_comp
+```
 
 Reproducibility corrections made with this benchmark update:
 
