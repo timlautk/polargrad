@@ -1,100 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mode=${1:-all}
-profile_root=${POLARGRAD_PROFILE_ROOT:-results_additional}
-metrics=gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,dram__throughput.avg.pct_of_peak_sustained_elapsed
+POLARGRAD_BENCH_ROOT="results_additional/timing_memory"
 
-mkdir -p "${profile_root}/ncu" "${profile_root}/profile_runs"
+mkdir -p "${POLARGRAD_BENCH_ROOT}/training"
+mkdir -p "${POLARGRAD_BENCH_ROOT}/oracles"
 
-profile_training() {
-    local script=$1
-    local experiment=$2
-    local method_id=$3
-    local range="training__${experiment}__${method_id}__repeat_0/"
-    local report="${profile_root}/ncu/${experiment}_${method_id}.ncu-rep"
-    local csv="${profile_root}/ncu/${experiment}_${method_id}.csv"
-    local log="${profile_root}/ncu/${experiment}_${method_id}.console.log"
-    local results="${profile_root}/profile_runs/${experiment}_${method_id}"
-    if ! ncu --target-processes all --nvtx --nvtx-include "${range}" \
-        --metrics "${metrics}" --export "${report}" --force-overwrite \
-        --page raw --csv --log-file "${csv}" \
-        python "${script}" --device=cuda --seed=42 --benchmark_only=True \
-        --benchmark_steps=1 --benchmark_warmup=10 --benchmark_repeats=1 \
-        --benchmark_trace_every=0 --benchmark_filter="${method_id}" \
-        --benchmark_nvtx=True --results_dir="${results}" 2>&1 | tee "${log}"
-    then
-        echo "Nsight Compute failed; inspect ${log}." >&2
-        return 1
-    fi
-    if [[ ! -s "${report}" ]]; then
-        echo "No report was created; inspect ${log} and ${csv}." >&2
-        return 1
-    fi
-}
+# Optional numerical validation before benchmarking
+python validate_polar_oracles.py --device=cpu
 
-profile_oracle() {
-    local method=$1
-    local steps=$2
-    local method_tag=${method//-/_}
-    local range="polar__${method_tag}__steps_${steps}__shape_4096x1024__gaussian/"
-    local report="${profile_root}/ncu/oracle_${method_tag}_steps${steps}.ncu-rep"
-    local csv="${profile_root}/ncu/oracle_${method_tag}_steps${steps}.csv"
-    local log="${profile_root}/ncu/oracle_${method_tag}_steps${steps}.console.log"
-    local results="${profile_root}/profile_runs/oracle_${method_tag}_steps${steps}"
-    if ! ncu --target-processes all --nvtx --nvtx-include "${range}" \
-        --metrics "${metrics}" --export "${report}" --force-overwrite \
-        --page raw --csv --log-file "${csv}" \
-        python benchmark_polar_oracles.py --device=cuda \
-        --shapes=4096x1024 --methods="${method}" --spectra=gaussian \
-        --inner-steps="${steps}" --calls=1 --warmup-calls=5 --repeats=1 \
-        --compute-reference --matmul-precision=highest --nvtx \
-        --output-dir="${results}" 2>&1 | tee "${log}"
-    then
-        echo "Nsight Compute failed; inspect ${log}." >&2
-        return 1
-    fi
-    if [[ ! -s "${report}" ]]; then
-        echo "No report was created; inspect ${log} and ${csv}." >&2
-        return 1
-    fi
-}
+# Section 6.1: matrix quadratic regression
+for seed in 42 142 242; do
+    python mat_quad_reg.py \
+        --device=cuda \
+        --seed="${seed}" \
+        --benchmark_only=True \
+        --benchmark_steps=4000 \
+        --benchmark_warmup=10 \
+        --benchmark_repeats=3 \
+        --benchmark_trace_every=0 \
+        --matmul_precision=high \
+        --results_dir="${POLARGRAD_BENCH_ROOT}/training"
+done
 
-run_training_profiles() {
-    profile_training mat_quad_reg.py mat_quad_reg polargrad_qdwh_lr_decay
-    profile_training mat_quad_reg.py mat_quad_reg muon_qdwh_lr_decay
-    profile_training mat_quad_reg.py mat_quad_reg adam_lr_decay
-    profile_training mat_log_reg.py mat_log_reg polarsgd_qdwh_lr_decay
-    profile_training mat_log_reg.py mat_log_reg muon_qdwh_lr_decay
-    profile_training mat_log_reg.py mat_log_reg adam_lr_decay
-    profile_training low_rank_mat_comp.py low_rank_mat_comp polargrad_qdwh_lr_decay
-    profile_training low_rank_mat_comp.py low_rank_mat_comp muon_qdwh_lr_decay
-    profile_training low_rank_mat_comp.py low_rank_mat_comp adam_lr_decay
-}
+# Section 6.2: matrix logistic regression
+for seed in 42 142 242; do
+    python mat_log_reg.py \
+        --device=cuda \
+        --seed="${seed}" \
+        --benchmark_only=True \
+        --benchmark_steps=1500 \
+        --benchmark_warmup=10 \
+        --benchmark_repeats=3 \
+        --benchmark_trace_every=0 \
+        --matmul_precision=high \
+        --results_dir="${POLARGRAD_BENCH_ROOT}/training"
+done
 
-run_oracle_profiles() {
-    profile_oracle qdwh 2
-    profile_oracle qdwh 5
-    profile_oracle ns 5
-    profile_oracle polar_express 5
-    profile_oracle zolo-pd 5
-}
+# Section 6.3: low-rank matrix completion
+for seed in 42 142 242; do
+    python low_rank_mat_comp.py \
+        --device=cuda \
+        --seed="${seed}" \
+        --benchmark_only=True \
+        --benchmark_steps=1000 \
+        --benchmark_warmup=10 \
+        --benchmark_repeats=3 \
+        --benchmark_trace_every=0 \
+        --matmul_precision=high \
+        --results_dir="${POLARGRAD_BENCH_ROOT}/training"
+done
 
-case "${mode}" in
-    training)
-        run_training_profiles
-        ;;
-    oracles)
-        run_oracle_profiles
-        ;;
-    all)
-        run_training_profiles
-        run_oracle_profiles
-        ;;
-    *)
-        echo "Usage: $0 [training|oracles|all]" >&2
-        exit 2
-        ;;
-esac
+# Aggregate the three training experiments
+python summarize_benchmark_runs.py \
+    --results-dir="${POLARGRAD_BENCH_ROOT}/training"
 
-echo "Nsight Compute reports were written under ${profile_root}/ncu."
+# Polar-oracle timing, memory, and numerical-accuracy benchmark
+python benchmark_polar_oracles.py \
+    --device=cuda \
+    --shapes=500x100,1000x100,500x5,250x5,1024x1024,4096x1024 \
+    --methods=qdwh,zolo-pd,ns,polar_express \
+    --spectra=gaussian,ill_conditioned,rank_deficient \
+    --inner-steps=2,5 \
+    --condition-number=1e6 \
+    --calls=20 \
+    --warmup-calls=5 \
+    --repeats=3 \
+    --compute-reference \
+    --matmul-precision=highest \
+    --output-dir="${POLARGRAD_BENCH_ROOT}/oracles"
