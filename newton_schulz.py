@@ -13,7 +13,16 @@ def zeropower_via_newtonschulz5(G, compute_hermitian=False, max_iterations=5, a=
     where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
     performance at all relative to UV^T, where USV^T = G is the SVD.
     """
-    assert G.ndim >= 2 # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
+    if G.ndim < 2:
+        raise ValueError(
+            f"Newton--Schulz expects a matrix or batch of matrices, but received shape {tuple(G.shape)}."
+        )
+    if min(G.shape[-2:]) == 0:
+        raise ValueError("Newton--Schulz does not support empty matrices.")
+    if G.is_complex():
+        raise TypeError("Newton--Schulz currently supports real matrices only.")
+    if max_iterations < 0:
+        raise ValueError("max_iterations must be nonnegative.")
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
         X = X.mT
@@ -26,16 +35,16 @@ def zeropower_via_newtonschulz5(G, compute_hermitian=False, max_iterations=5, a=
         B = b * A + c * A @ A # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
         X = a * X + B @ X
 
-    if compute_hermitian:
-        H = G.type_as(X).mT @ X.mT
-        H = (H + H.mT) / 2
-    
     if G.size(-2) > G.size(-1):
         X = X.mT
-        if compute_hermitian:
-            H = H.mT
-    
+
     if compute_hermitian:
+        G_work = G.type_as(X)
+        if G.size(-2) >= G.size(-1):
+            H = X.mH @ G_work
+        else:
+            H = G_work @ X.mH
+        H = (H + H.mH) / 2
         return X, H
     else:
         return X
@@ -46,7 +55,16 @@ def precond_newtonschulz(G, compute_hermitian=False):
     """
     Preconditioned Newton-Schulz iteration to compute the polar factor of G. 
     """
-    assert G.ndim >= 2 # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
+    if G.ndim < 2:
+        raise ValueError(
+            f"Preconditioned Newton--Schulz expects a matrix or batch of matrices, but received shape {tuple(G.shape)}."
+        )
+    if min(G.shape[-2:]) == 0:
+        raise ValueError("Preconditioned Newton--Schulz does not support empty matrices.")
+    if G.is_complex():
+        raise TypeError(
+            "Preconditioned Newton--Schulz currently supports real matrices only."
+        )
     X = G.bfloat16()
     if G.size(-2) > G.size(-1):
         X = X.mT
@@ -69,16 +87,16 @@ def precond_newtonschulz(G, compute_hermitian=False):
         delta = torch.linalg.matrix_norm(X_new - X)
         X = X_new
 
-    if compute_hermitian:
-        H = G.type_as(X).mT @ X.mT
-        H = (H + H.mT) / 2
-    
     if G.size(-2) > G.size(-1):
         X = X.mT
-        if compute_hermitian:
-            H = H.mT
-    
+
     if compute_hermitian:
+        G_work = G.type_as(X)
+        if G.size(-2) >= G.size(-1):
+            H = X.mH @ G_work
+        else:
+            H = G_work @ X.mH
+        H = (H + H.mH) / 2
         return X, H
     else:
         return X

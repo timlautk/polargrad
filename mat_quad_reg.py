@@ -13,6 +13,7 @@
 # limitations under the License
 
 import os
+import statistics
 import fire
 from tqdm import tqdm
 
@@ -27,8 +28,11 @@ import torch.nn as nn
 from polar_grad import PolarGrad
 from muon import Muon_polar
 from benchmarking import (
+    ensure_clean_git,
+    prepare_benchmark_output,
     print_benchmark_summary,
     resolve_device,
+    run_convergence_trace,
     run_training_benchmark,
     save_benchmark_results,
     seed_everything,
@@ -91,8 +95,15 @@ def main(
     benchmark_steps=None,
     benchmark_warmup=10,
     benchmark_repeats=3,
+    benchmark_trace_every=10,
     results_dir="results",
+    matmul_precision="high",
+    allow_dirty_git=False,
+    allow_mixed_runs=False,
 ):
+    if str(matmul_precision) not in {"highest", "high", "medium"}:
+        raise ValueError("matmul_precision must be highest, high, or medium.")
+    torch.set_float32_matmul_precision(str(matmul_precision))
     device = resolve_device(device)
     print(f"Using device: {device}")
 
@@ -113,10 +124,21 @@ def main(
     eigvals_B = torch.linalg.eigvalsh(B @ B.T)
     print(f"Hessian condition number: {eigvals_A[-1] / eigvals_A[0] * eigvals_B[-1] / eigvals_B[0]}")
 
-    AtA_inv = torch.linalg.inv(A.T @ A)     # (m x m)
-    BBt_inv = torch.linalg.inv(B @ B.T)
-    X_star = AtA_inv @ A.T @ C @ B.T @ BBt_inv
-    optimal_loss = loss_fn(X_star, A, B, C).item()
+    # Compute the reference optimum in float64 with least-squares solves rather
+    # than explicit normal-equation inverses. Benchmark objective gaps are also
+    # evaluated in float64 below.
+    A_reference = A.to(torch.float64)
+    B_reference = B.to(torch.float64)
+    C_reference = C.to(torch.float64)
+    intermediate_star = torch.linalg.lstsq(
+        A_reference, C_reference
+    ).solution
+    X_star = torch.linalg.lstsq(
+        B_reference.mT, intermediate_star.mT
+    ).solution.mT
+    optimal_loss = loss_fn(
+        X_star, A_reference, B_reference, C_reference
+    ).item()
     print(f"Loss at X_star: {optimal_loss}")
 
     def make_optimizer(model, optimizer_cls, method, lr, use_scheduler):
@@ -141,6 +163,12 @@ def main(
         return optimizer, scheduler
 
     def run_benchmarks():
+        ensure_clean_git(allow_dirty=bool(allow_dirty_git))
+        prepare_benchmark_output(
+            results_dir,
+            device=device,
+            allow_mixed_runs=bool(allow_mixed_runs),
+        )
         measured_steps = int(benchmark_steps or steps)
         configurations = [
             ("PolarGrad (QDWH)", PolarGrad, "qdwh", 4e-8, False),
@@ -154,6 +182,7 @@ def main(
             ("Adam (lr decay)", torch.optim.Adam, None, 5e-2, True),
         ]
         records = []
+        traces = []
         for name, optimizer_cls, method, lr, use_scheduler in configurations:
             def setup_fn(run_seed, optimizer_cls=optimizer_cls, method=method,
                          lr=lr, use_scheduler=use_scheduler):
@@ -185,8 +214,19 @@ def main(
                     recorder.end_step()
                 return loss
 
-            records.extend(
-                run_training_benchmark(
+            def final_metrics_fn(state):
+                final_loss = loss_fn(
+                    state["model"].X.to(torch.float64),
+                    A_reference,
+                    B_reference,
+                    C_reference,
+                )
+                return {
+                    "final_loss": final_loss,
+                    "objective_gap": final_loss - optimal_loss,
+                }
+
+            configuration_records = run_training_benchmark(
                     name=name,
                     setup_fn=setup_fn,
                     step_fn=step_fn,
@@ -195,6 +235,7 @@ def main(
                     warmup_steps=int(benchmark_warmup),
                     repeats=int(benchmark_repeats),
                     device=device,
+                    final_metrics_fn=final_metrics_fn,
                     metadata={
                         "optimizer": optimizer_cls.__name__,
                         "polar_method": method,
@@ -207,7 +248,25 @@ def main(
                         "matrix_shape": f"{m}x{n}",
                         "data_shapes": f"A:{p}x{m};B:{n}x{q};C:{p}x{q}",
                         "dtype": str(A.dtype),
+                        "optimal_loss": optimal_loss,
                     },
+                )
+            records.extend(configuration_records)
+            traces.extend(
+                run_convergence_trace(
+                    name=name,
+                    setup_fn=setup_fn,
+                    step_fn=step_fn,
+                    metrics_fn=final_metrics_fn,
+                    seed=seed,
+                    steps=measured_steps,
+                    checkpoint_every=int(benchmark_trace_every),
+                    warmup_steps=int(benchmark_warmup),
+                    device=device,
+                    estimated_step_time_s=statistics.median(
+                        record["step_time_ms"] for record in configuration_records
+                    )
+                    / 1000.0,
                 )
             )
 
@@ -237,8 +296,19 @@ def main(
                 recorder.end_step()
             return loss
 
-        records.extend(
-            run_training_benchmark(
+        def final_newton_metrics(state):
+            final_loss = loss_fn(
+                state["model"].X.to(torch.float64),
+                A_reference,
+                B_reference,
+                C_reference,
+            )
+            return {
+                "final_loss": final_loss,
+                "objective_gap": final_loss - optimal_loss,
+            }
+
+        newton_records = run_training_benchmark(
                 name="Newton (inverse Hessian)",
                 setup_fn=setup_newton,
                 step_fn=step_newton,
@@ -247,6 +317,7 @@ def main(
                 warmup_steps=int(benchmark_warmup),
                 repeats=int(benchmark_repeats),
                 device=device,
+                final_metrics_fn=final_newton_metrics,
                 metadata={
                     "optimizer": "inverse_hessian",
                     "polar_method": None,
@@ -255,7 +326,25 @@ def main(
                     "matrix_shape": f"{m}x{n}",
                     "data_shapes": f"A:{p}x{m};B:{n}x{q};C:{p}x{q}",
                     "dtype": str(A.dtype),
+                    "optimal_loss": optimal_loss,
                 },
+            )
+        records.extend(newton_records)
+        traces.extend(
+            run_convergence_trace(
+                name="Newton (inverse Hessian)",
+                setup_fn=setup_newton,
+                step_fn=step_newton,
+                metrics_fn=final_newton_metrics,
+                seed=seed,
+                steps=measured_steps,
+                checkpoint_every=int(benchmark_trace_every),
+                warmup_steps=int(benchmark_warmup),
+                device=device,
+                estimated_step_time_s=statistics.median(
+                    record["step_time_ms"] for record in newton_records
+                )
+                / 1000.0,
             )
         )
         print_benchmark_summary(records)
@@ -265,6 +354,8 @@ def main(
             seed=seed,
             output_dir=results_dir,
             device=device,
+            traces=traces,
+            allow_mixed_runs=bool(allow_mixed_runs),
         )
         print(f"Saved benchmark results: {paths}")
         return records

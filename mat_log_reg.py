@@ -13,6 +13,7 @@
 # limitations under the License
 
 import os
+import statistics
 import fire
 from tqdm import tqdm
 
@@ -28,8 +29,11 @@ import torch.nn.functional as F
 from polar_grad import PolarGrad
 from muon import Muon_polar
 from benchmarking import (
+    ensure_clean_git,
+    prepare_benchmark_output,
     print_benchmark_summary,
     resolve_device,
+    run_convergence_trace,
     run_training_benchmark,
     save_benchmark_results,
     seed_everything,
@@ -64,8 +68,15 @@ def main(
     benchmark_steps=None,
     benchmark_warmup=10,
     benchmark_repeats=3,
+    benchmark_trace_every=10,
     results_dir="results",
+    matmul_precision="high",
+    allow_dirty_git=False,
+    allow_mixed_runs=False,
 ):
+    if str(matmul_precision) not in {"highest", "high", "medium"}:
+        raise ValueError("matmul_precision must be highest, high, or medium.")
+    torch.set_float32_matmul_precision(str(matmul_precision))
     device = resolve_device(device)
     print(f"Using device: {device}")
 
@@ -75,7 +86,7 @@ def main(
     torch.manual_seed(seed)
     A = torch.randn(N, m, device=device)
     B = torch.randn(n, q, device=device)
-    C = (torch.randn(N, q, device=device) > 0.5).float()
+    C = 2.0 * (torch.randn(N, q, device=device) > 0.5).to(A.dtype) - 1.0
 
     # Subsampling utility for mini-batch rows of A and C
     def sample_batch(batch_size=1000):
@@ -104,6 +115,12 @@ def main(
         return optimizer, scheduler
 
     def run_benchmarks():
+        ensure_clean_git(allow_dirty=bool(allow_dirty_git))
+        prepare_benchmark_output(
+            results_dir,
+            device=device,
+            allow_mixed_runs=bool(allow_mixed_runs),
+        )
         measured_steps = int(benchmark_steps or steps)
         batch_size = 1000
         configurations = [
@@ -116,6 +133,7 @@ def main(
             ("Adam (lr decay)", torch.optim.Adam, None, 1e-2, True),
         ]
         records = []
+        traces = []
         for name, optimizer_cls, method, lr, use_scheduler in configurations:
             def setup_fn(run_seed, optimizer_cls=optimizer_cls, method=method,
                          lr=lr, use_scheduler=use_scheduler):
@@ -148,8 +166,14 @@ def main(
                     recorder.end_step()
                 return loss
 
-            records.extend(
-                run_training_benchmark(
+            def final_metrics_fn(state):
+                final_loss = state["model"](A, B, C)
+                return {
+                    "final_loss": final_loss,
+                    "final_loss_per_entry": final_loss / C.numel(),
+                }
+
+            configuration_records = run_training_benchmark(
                     name=name,
                     setup_fn=setup_fn,
                     step_fn=step_fn,
@@ -158,6 +182,7 @@ def main(
                     warmup_steps=int(benchmark_warmup),
                     repeats=int(benchmark_repeats),
                     device=device,
+                    final_metrics_fn=final_metrics_fn,
                     metadata={
                         "optimizer": optimizer_cls.__name__,
                         "polar_method": method,
@@ -171,7 +196,25 @@ def main(
                         "matrix_shape": f"{m}x{n}",
                         "data_shapes": f"A:{N}x{m};B:{n}x{q};C:{N}x{q}",
                         "dtype": str(A.dtype),
+                        "label_encoding": "{-1,+1}",
                     },
+                )
+            records.extend(configuration_records)
+            traces.extend(
+                run_convergence_trace(
+                    name=name,
+                    setup_fn=setup_fn,
+                    step_fn=step_fn,
+                    metrics_fn=final_metrics_fn,
+                    seed=seed,
+                    steps=measured_steps,
+                    checkpoint_every=int(benchmark_trace_every),
+                    warmup_steps=int(benchmark_warmup),
+                    device=device,
+                    estimated_step_time_s=statistics.median(
+                        record["step_time_ms"] for record in configuration_records
+                    )
+                    / 1000.0,
                 )
             )
         print_benchmark_summary(records)
@@ -181,6 +224,8 @@ def main(
             seed=seed,
             output_dir=results_dir,
             device=device,
+            traces=traces,
+            allow_mixed_runs=bool(allow_mixed_runs),
         )
         print(f"Saved benchmark results: {paths}")
         return records

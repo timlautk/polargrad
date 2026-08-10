@@ -33,7 +33,14 @@ from pathlib import Path
 
 import torch
 
-from benchmarking import MIB, resolve_device, seed_everything, synchronize, system_metadata
+from benchmarking import (
+    MIB,
+    ensure_clean_git,
+    prepare_benchmark_output,
+    resolve_device,
+    seed_everything,
+    synchronize,
+)
 from polar import polar
 
 
@@ -98,43 +105,89 @@ def make_matrix(rows, columns, spectrum, condition_number, seed, device, dtype):
     return (left * singular_values.unsqueeze(0)) @ right.mT
 
 
-def polar_residuals(matrix, unitary, reference=None):
-    work_dtype = torch.float64 if matrix.dtype == torch.float64 else torch.float32
+def polar_residuals(matrix, unitary, reference=None, reference_nuclear_norm=None):
+    """Compute polar-specific residuals in double precision.
+
+    Reconstruction uses a symmetrized Hermitian factor, so it cannot collapse
+    to a mere column- or row-space projection test. Positive-semidefiniteness is
+    checked separately because symmetry alone does not characterize a polar
+    factor.
+    """
+    work_dtype = torch.complex128 if matrix.is_complex() else torch.float64
     matrix = matrix.to(work_dtype)
     unitary = unitary.to(work_dtype)
     rows, columns = matrix.shape
     order = min(rows, columns)
     identity = torch.eye(order, device=matrix.device, dtype=work_dtype)
     if rows >= columns:
-        gram = unitary.mT @ unitary
-        hermitian = unitary.mT @ matrix
-        reconstruction = unitary @ hermitian
+        gram = unitary.mH @ unitary
+        hermitian_raw = unitary.mH @ matrix
     else:
-        gram = unitary @ unitary.mT
-        hermitian = matrix @ unitary.mT
-        reconstruction = hermitian @ unitary
-    orthogonality = torch.linalg.matrix_norm(gram - identity) / math.sqrt(order)
-    reconstruction_error = torch.linalg.matrix_norm(reconstruction - matrix) / max(
-        torch.linalg.matrix_norm(matrix), torch.finfo(work_dtype).eps
+        gram = unitary @ unitary.mH
+        hermitian_raw = matrix @ unitary.mH
+    hermitian = 0.5 * (hermitian_raw + hermitian_raw.mH)
+    reconstruction = (
+        unitary @ hermitian if rows >= columns else hermitian @ unitary
     )
+    matrix_norm = torch.linalg.matrix_norm(matrix)
+    denominator = max(matrix_norm, torch.finfo(matrix.real.dtype).eps)
+    orthogonality = torch.linalg.matrix_norm(gram - identity) / math.sqrt(order)
+    symmetry_error = torch.linalg.matrix_norm(
+        hermitian_raw - hermitian_raw.mH
+    ) / denominator
+    reconstruction_error = torch.linalg.matrix_norm(
+        reconstruction - matrix
+    ) / denominator
+    eigenvalues = torch.linalg.eigvalsh(hermitian)
+    negative_eigenvalues = torch.clamp(-eigenvalues, min=0)
+    hermitian_norm = max(
+        torch.linalg.matrix_norm(hermitian),
+        torch.finfo(matrix.real.dtype).eps,
+    )
+    psd_violation = torch.linalg.vector_norm(negative_eigenvalues) / hermitian_norm
     direction_error = None
     if reference is not None:
         reference = reference.to(work_dtype)
         direction_error = torch.linalg.matrix_norm(unitary - reference) / max(
-            torch.linalg.matrix_norm(reference), torch.finfo(work_dtype).eps
+            torch.linalg.matrix_norm(reference),
+            torch.finfo(matrix.real.dtype).eps,
         )
-    return {
+    objective_gap = None
+    if reference_nuclear_norm is not None:
+        polar_objective = torch.real(torch.trace(hermitian_raw))
+        objective_gap = (
+            reference_nuclear_norm - polar_objective
+        ) / max(reference_nuclear_norm, torch.finfo(matrix.real.dtype).eps)
+    residuals = {
         "orthogonality_residual": float(orthogonality.item()),
+        "hermitian_symmetry_residual": float(symmetry_error.item()),
+        "relative_psd_violation": float(psd_violation.item()),
         "reconstruction_residual": float(reconstruction_error.item()),
+        "polar_objective_relative_gap": (
+            float(objective_gap.item()) if objective_gap is not None else None
+        ),
         "relative_direction_error": (
             float(direction_error.item()) if direction_error is not None else None
         ),
     }
+    nonfinite = {
+        key: value
+        for key, value in residuals.items()
+        if value is not None and not math.isfinite(value)
+    }
+    if nonfinite:
+        raise RuntimeError(f"Non-finite polar residuals: {nonfinite}")
+    return residuals
 
 
-def exact_polar_factor(matrix):
-    left, _, right_h = torch.linalg.svd(matrix, full_matrices=False)
-    return left @ right_h
+def exact_polar_reference(matrix):
+    """Return an SVD polar factor and nuclear norm computed in float64."""
+    work_dtype = torch.complex128 if matrix.is_complex() else torch.float64
+    matrix = matrix.to(work_dtype)
+    left, singular_values, right_h = torch.linalg.svd(
+        matrix, full_matrices=False
+    )
+    return left @ right_h, singular_values.sum()
 
 
 def benchmark_configuration(
@@ -148,6 +201,8 @@ def benchmark_configuration(
     device,
     metadata,
     reference,
+    reference_nuclear_norm,
+    nvtx,
 ):
     records = []
     for repeat in range(repeats):
@@ -162,16 +217,28 @@ def benchmark_configuration(
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             stream = torch.cuda.current_stream(device)
-            start_event.record(stream)
         else:
             baseline_allocated = 0
             start_event = None
             end_event = None
 
         wall_start = time.perf_counter()
+        if start_event is not None:
+            start_event.record(stream)
         unitary = None
-        for _ in range(calls):
-            unitary = polar(matrix, method=method, max_iterations=inner_steps)[0]
+        if nvtx and device.type == "cuda":
+            torch.cuda.nvtx.range_push(
+                f"polar/{method}/steps={inner_steps}/{metadata['shape']}/"
+                f"{metadata['spectrum']}"
+            )
+        try:
+            for _ in range(calls):
+                unitary = polar(
+                    matrix, method=method, max_iterations=inner_steps
+                )[0]
+        finally:
+            if nvtx and device.type == "cuda":
+                torch.cuda.nvtx.range_pop()
         if end_event is not None:
             end_event.record(stream)
         synchronize(device)
@@ -179,12 +246,17 @@ def benchmark_configuration(
 
         if unitary is None:
             raise RuntimeError("No oracle call was executed.")
+        if unitary.shape != matrix.shape:
+            raise RuntimeError(
+                f"The {method} oracle returned shape {tuple(unitary.shape)} "
+                f"for input shape {tuple(matrix.shape)}."
+            )
         if start_event is not None:
-            device_time_ms = start_event.elapsed_time(end_event)
+            cuda_stream_span_ms = start_event.elapsed_time(end_event)
             peak_allocated = torch.cuda.max_memory_allocated(device)
             peak_reserved = torch.cuda.max_memory_reserved(device)
         else:
-            device_time_ms = wall_time * 1000.0
+            cuda_stream_span_ms = None
             peak_allocated = 0
             peak_reserved = 0
 
@@ -193,15 +265,25 @@ def benchmark_configuration(
             "repeat": repeat,
             "method": method,
             "inner_steps": inner_steps if method != "zolo-pd" else None,
+            "output_dtype": str(unitary.dtype),
             "calls": calls,
             "warmup_calls": warmup_calls,
             "wall_time_s": wall_time,
             "time_per_call_ms": 1000.0 * wall_time / calls,
-            "device_time_per_call_ms": device_time_ms / calls,
-            # Timing-based activity proxy; it is not SM occupancy or FLOP efficiency.
-            "device_activity_pct": 100.0
-            * device_time_ms
-            / max(1000.0 * wall_time, 1e-12),
+            "cuda_stream_span_per_call_ms": (
+                cuda_stream_span_ms / calls
+                if cuda_stream_span_ms is not None
+                else None
+            ),
+            # A stream-span fraction is not GPU utilization, SM occupancy, or
+            # achieved FLOP efficiency. Hardware efficiency must be profiled.
+            "cuda_stream_span_fraction_pct": (
+                100.0
+                * cuda_stream_span_ms
+                / max(1000.0 * wall_time, 1e-12)
+                if cuda_stream_span_ms is not None
+                else None
+            ),
             "baseline_allocated_mib": baseline_allocated / MIB,
             "peak_allocated_mib": peak_allocated / MIB,
             "incremental_peak_allocated_mib": max(
@@ -209,7 +291,12 @@ def benchmark_configuration(
             )
             / MIB,
             "peak_reserved_mib": peak_reserved / MIB,
-            **polar_residuals(matrix, unitary, reference),
+            **polar_residuals(
+                matrix,
+                unitary,
+                reference,
+                reference_nuclear_norm,
+            ),
             "status": "ok",
         }
         records.append(record)
@@ -224,13 +311,16 @@ def summarize(records):
             groups[tuple(record.get(key) for key in keys)].append(record)
     metrics = (
         "time_per_call_ms",
-        "device_time_per_call_ms",
-        "device_activity_pct",
+        "cuda_stream_span_per_call_ms",
+        "cuda_stream_span_fraction_pct",
         "peak_allocated_mib",
         "incremental_peak_allocated_mib",
         "peak_reserved_mib",
         "orthogonality_residual",
+        "hermitian_symmetry_residual",
+        "relative_psd_violation",
         "reconstruction_residual",
+        "polar_objective_relative_gap",
         "relative_direction_error",
     )
     summaries = []
@@ -297,9 +387,23 @@ def main():
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--compute-reference", action="store_true")
+    parser.add_argument(
+        "--matmul-precision",
+        choices=("highest", "high", "medium"),
+        default="highest",
+        help="PyTorch float32 matmul precision; recorded in the output metadata.",
+    )
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument(
+        "--nvtx",
+        action="store_true",
+        help="Annotate measured oracle blocks for Nsight profiling.",
+    )
+    parser.add_argument("--allow-dirty-git", action="store_true")
+    parser.add_argument("--allow-mixed-runs", action="store_true")
+    parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--profile-calls", type=int, default=5)
-    parser.add_argument("--output-dir", default="results")
+    parser.add_argument("--output-dir", default="results/oracles")
     args = parser.parse_args()
 
     if min(args.calls, args.repeats) <= 0 or args.warmup_calls < 0:
@@ -315,10 +419,16 @@ def main():
     if not set(spectra) <= valid_spectra:
         parser.error(f"Unknown spectra: {sorted(set(spectra) - valid_spectra)}")
 
+    ensure_clean_git(allow_dirty=args.allow_dirty_git)
+    torch.set_float32_matmul_precision(args.matmul_precision)
     device = resolve_device(args.device)
     dtype = getattr(torch, args.dtype)
     output = Path(args.output_dir)
-    output.mkdir(parents=True, exist_ok=True)
+    system = prepare_benchmark_output(
+        str(output),
+        device=device,
+        allow_mixed_runs=args.allow_mixed_runs,
+    )
     records = []
 
     for rows, columns in args.shapes:
@@ -334,11 +444,14 @@ def main():
             )
             # The polar factor is nonunique on the null space of a rank-deficient
             # matrix, so a direction error is not well defined in that regime.
-            reference = (
-                exact_polar_factor(matrix)
-                if args.compute_reference and spectrum != "rank_deficient"
-                else None
-            )
+            reference = None
+            reference_nuclear_norm = None
+            if args.compute_reference:
+                exact_reference, reference_nuclear_norm = exact_polar_reference(
+                    matrix
+                )
+                if spectrum != "rank_deficient":
+                    reference = exact_reference
             for method in methods:
                 inner_steps_values = [args.inner_steps[0]] if method == "zolo-pd" else args.inner_steps
                 for inner_steps in inner_steps_values:
@@ -369,6 +482,8 @@ def main():
                                 device=device,
                                 metadata=metadata,
                                 reference=reference,
+                                reference_nuclear_norm=reference_nuclear_norm,
+                                nvtx=args.nvtx,
                             )
                         )
                         if args.profile:
@@ -385,6 +500,8 @@ def main():
                                 device,
                             )
                     except (RuntimeError, ValueError) as exc:
+                        if not args.continue_on_error:
+                            raise
                         records.append(
                             {
                                 **metadata,
@@ -405,7 +522,7 @@ def main():
     with json_path.open("w", encoding="utf-8") as handle:
         json.dump(
             {
-                "system": system_metadata(device),
+                "system": system,
                 "arguments": vars(args),
                 "records": records,
                 "summary": summaries,

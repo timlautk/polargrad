@@ -83,10 +83,19 @@ def polar(a: torch.Tensor,
     # Convert input to tensor.
     arr = torch.as_tensor(a)
     if arr.ndim != 2:
-        raise ValueError("The input `a` must be a 2-D array.")
+        raise ValueError(
+            f"The input `a` must be a 2-D matrix, but received shape {tuple(arr.shape)}."
+        )
+    if min(arr.shape) == 0:
+        raise ValueError("The input `a` must be nonempty.")
+    if not (arr.is_floating_point() or arr.is_complex()):
+        raise TypeError("The input `a` must have a floating-point or complex dtype.")
 
     m, n = arr.shape
     max_iterations = max_iterations if max_iterations is not None else 5
+    if not isinstance(max_iterations, int) or max_iterations < 0:
+        raise ValueError("max_iterations must be a nonnegative integer.")
+    posdef = None
 
     if method == "qdwh":
         from qdwh import qdwh
@@ -113,10 +122,16 @@ def polar(a: torch.Tensor,
                 posdef = posdef.transpose(0, 1).conj()
     elif method == "zolo-pd":
         from zolopd import zolopd
-        res = zolopd(arr, compute_hermitian=compute_hermitian)
-        unitary = res[0]
-        if compute_hermitian:
-            posdef = res[1]
+        if m >= n:
+            res = zolopd(arr, compute_hermitian=compute_hermitian)
+            unitary = res[0]
+            if compute_hermitian:
+                posdef = res[1]
+        else:
+            res = zolopd(arr.mH, compute_hermitian=compute_hermitian)
+            unitary = res[0].mH
+            if compute_hermitian:
+                posdef = res[1]
     elif method == "ns":
         from newton_schulz import zeropower_via_newtonschulz5
         res = zeropower_via_newtonschulz5(arr, compute_hermitian=compute_hermitian, max_iterations=max_iterations, a=ns_coeffs[0], b=ns_coeffs[1], c=ns_coeffs[2])
@@ -127,9 +142,10 @@ def polar(a: torch.Tensor,
     elif method == "precond_ns":
         from newton_schulz import precond_newtonschulz
         res = precond_newtonschulz(arr, compute_hermitian=compute_hermitian)
-        unitary = res[0]
         if compute_hermitian:
-            posdef = res[1]
+            unitary, posdef = res
+        else:
+            unitary = res
     elif method == "polar_express":
         from polar_express import PolarExpress
         res = PolarExpress(arr, compute_hermitian=compute_hermitian, max_iterations=max_iterations)
@@ -140,4 +156,4 @@ def polar(a: torch.Tensor,
     else:
         raise ValueError(f"Unknown polar decomposition method {method}.")
     
-    return unitary, posdef if compute_hermitian else unitary
+    return unitary, posdef

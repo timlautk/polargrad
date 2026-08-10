@@ -30,6 +30,22 @@ import torch
 import math
 
 
+def _check_cholesky_info(info, message):
+    """Check a Cholesky status without forcing a CUDA host synchronization."""
+    success = torch.all(info == 0)
+    if info.device.type == "cuda" and hasattr(torch, "_assert_async"):
+        torch._assert_async(success, message)
+    elif not bool(success):
+        raise RuntimeError(message)
+
+
+def _right_solve_spd(A, matrix):
+    """Return ``A @ matrix^{-1}`` for a Hermitian positive-definite matrix."""
+    factor, info = torch.linalg.cholesky_ex(matrix, upper=False)
+    _check_cholesky_info(info, "ZOLO-PD Cholesky factorization failed.")
+    return torch.cholesky_solve(A.mH, factor, upper=False).mH
+
+
 # Helper for estimating the spectral norm, corresponding to the normest function in MATLAB.
 def normest(A, tol=1e-6, max_iter=20):
     """
@@ -61,7 +77,7 @@ def normest(A, tol=1e-6, max_iter=20):
             return 0.0
         
         # Update x by multiplying by A^T (and normalize)
-        x = A.T @ y / norm_y
+        x = A.mH @ y / norm_y
         
         # Current estimate of the norm is the norm of y
         norm_new = norm_y
@@ -141,25 +157,16 @@ def computeAA(A, c, it, howqr='house'):
                 Q, _ = torch.linalg.qr(stacked, mode='reduced')
                 AAA_top = Q[:m, :]
                 AAA_bottom = Q[m:, :]
-                AA = AA - (enu / den / sqrt_c) * (AAA_top @ AAA_bottom.T)
+                AA = AA - (enu / den / sqrt_c) * (AAA_top @ AAA_bottom.mH)
             else:
                 # Cholesky-based branch (less recommended)
-                sqrt_c = torch.sqrt(c_val)
                 I_n = torch.eye(n, dtype=A.dtype, device=A.device)
-                R, _ = torch.linalg.cholesky_ex(A.T @ A + c_val * I_n)
-                Q = torch.linalg.solve_triangular(R, A.T, upper=True).T
-                II = sqrt_c * I_n
-                II = torch.linalg.solve_triangular(R, II, upper=True).T
-                # (Optionally, one could check torch.linalg.cond(R) here.)
-                AA = AA - (enu / den / sqrt_c) * (Q @ II.T)
+                correction = _right_solve_spd(A, A.mH @ A + c_val * I_n)
+                AA = AA - (enu / den) * correction
         else:
             I_n = torch.eye(n, dtype=A.dtype, device=A.device)
-            Cinv, _ = torch.linalg.cholesky_ex(A.T @ A + c_val * I_n)
-            # Compute A / Cinv: solve R X = A.T, then transpose back.
-            Qtmp = torch.linalg.solve_triangular(Cinv, A.T, upper=True).T
-            # Then divide by Cinv' (i.e. solve with Cinv again)
-            Qtmp = torch.linalg.solve_triangular(Cinv, Qtmp.T, upper=True).T
-            AA = AA - (enu / den) * Qtmp
+            correction = _right_solve_spd(A, A.mH @ A + c_val * I_n)
+            AA = AA - (enu / den) * correction
     return AA
 
 def mellipke(alpha, tol=None):
@@ -257,13 +264,21 @@ def zolopd(A, compute_hermitian=False, alpha=None, L=None):
         m_zol: the Zolotarev degree (an integer)
         it   : the iteration count (usually 1 or 2)
     """
+    if A.ndim != 2:
+        raise ValueError(f"ZOLO-PD expects a matrix, but received shape {tuple(A.shape)}.")
+    if min(A.shape) == 0:
+        raise ValueError("ZOLO-PD does not support empty matrices.")
+    if A.is_complex():
+        raise TypeError("ZOLO-PD currently supports real matrices only.")
+
     # Ensure A is float64 for accuracy.
     if A.dtype != torch.float64:
         A = A.to(torch.float64)
     m, n = A.shape
 
     # Check if A is (numerically) symmetric.
-    if m == n and torch.linalg.matrix_norm(A - A.T) / torch.linalg.matrix_norm(A) < 1e-14:
+    matrix_norm = torch.linalg.matrix_norm(A)
+    if m == n and matrix_norm > 0 and torch.linalg.matrix_norm(A - A.mH) / matrix_norm < 1e-14:
         symm = True
     else:
         symm = False
@@ -329,15 +344,15 @@ def zolopd(A, compute_hermitian=False, alpha=None, L=None):
         else:
             con = max(ff(con) / ff(1), 1)
         if symm:
-            U = 0.5 * (U.T + U)  # force symmetry if A is symmetric
+            U = 0.5 * (U.mH + U)  # force symmetry if A is symmetric
 
     # One step of Newton–Schulz postprocessing.
-    U = 1.5 * U - 0.5 * U @ (U.T @ U)
+    U = 1.5 * U - 0.5 * U @ (U.mH @ U)
 
     # Compute the Hermitian factor H.
     if compute_hermitian:
-        H = U.T @ A
-        H = (H + H.T) / 2
+        H = U.mH @ A
+        H = (H + H.mH) / 2
         return U, H, m_zol, it 
     else:
         return U, m_zol, it

@@ -25,7 +25,16 @@ def PolarExpress(
     compute_hermitian: bool = False, 
     max_iterations: int = 5, 
     ) -> torch.Tensor:
-    assert G.ndim >= 2
+    if G.ndim < 2:
+        raise ValueError(
+            f"Polar Express expects a matrix or batch of matrices, but received shape {tuple(G.shape)}."
+        )
+    if min(G.shape[-2:]) == 0:
+        raise ValueError("Polar Express does not support empty matrices.")
+    if G.is_complex():
+        raise TypeError("Polar Express currently supports real matrices only.")
+    if max_iterations < 0:
+        raise ValueError("max_iterations must be nonnegative.")
     X = G.bfloat16()  # for speed
     if G.size(-2) > G.size(-1): 
         X = X.mT  # this reduces FLOPs
@@ -38,16 +47,16 @@ def PolarExpress(
         B = b * A + c * A @ A
         X = a * X + B @ X  # X <- aX + bX ˆ3 + cX ˆ5
     
-    if compute_hermitian:
-        H = G.type_as(X).mT @ X.mT
-        H = (H + H.mT) / 2
-    
     if G.size(-2) > G.size(-1): 
         X = X.mT
-        if compute_hermitian:
-            H = H.mT
 
     if compute_hermitian:
+        G_work = G.type_as(X)
+        if G.size(-2) >= G.size(-1):
+            H = X.mH @ G_work
+        else:
+            H = G_work @ X.mH
+        H = (H + H.mH) / 2
         return X, H
     else:
         return X

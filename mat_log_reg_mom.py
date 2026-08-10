@@ -65,7 +65,7 @@ def main(seed=42, steps=1500):
     torch.manual_seed(seed)
     A = torch.randn(N, m, device=device)
     B = torch.randn(n, q, device=device)
-    C = (torch.rand(N, q, device=device) > 0.5).float()
+    C = 2.0 * (torch.randn(N, q, device=device) > 0.5).to(A.dtype) - 1.0
 
     # Subsampling utility for mini-batch rows of A and C
     def sample_batch(batch_size=1000):

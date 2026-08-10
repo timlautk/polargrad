@@ -29,6 +29,15 @@ import torch
 from typing import Optional
 
 
+def _check_cholesky_info(info, message):
+    """Check a Cholesky status without forcing a CUDA host synchronization."""
+    success = torch.all(info == 0)
+    if info.device.type == "cuda" and hasattr(torch, "_assert_async"):
+        torch._assert_async(success, message)
+    elif not bool(success):
+        raise RuntimeError(message)
+
+
 # Helpers for working with padded shapes
 def _mask(x, dims, alternative=0):
     """
@@ -211,26 +220,13 @@ def _use_cholesky(u, m, n, params):
     # with non-PSD matrices due to padding.
     x = _mask(x, (n, n), torch.eye(N, dtype=x.dtype, device=x.device))
     
-    # Compute the Cholesky factorization; y is lower-triangular.
-    y, _ = torch.linalg.cholesky_ex(x)
-    
-    # First triangular solve.
-    # In JAX:
-    #   z = triangular_solve(y, u.T, left_side=True, lower=True, conjugate_a=True).conj()
-    #
-    # In PyTorch we emulate the effect of conjugating A inside the solver by
-    # solving with y.conj() and then taking the conjugate of the solution.
-    # We solve:  (conj(y)) * temp = u.T, and then set z = temp.conj()
-    z = torch.linalg.solve_triangular(y.conj(), u.T, upper=False, left=True, unitriangular=False).conj()
-    
-    # Second triangular solve.
-    # In JAX:
-    #   z = triangular_solve(y, z, left_side=True, lower=True,
-    #                          transpose_a=True, conjugate_a=True).T.conj()
-    #
-    # In PyTorch, we solve:
-    #   (conj(y)).T * temp2 = z, and then take z = temp2.T.conj()
-    z = torch.linalg.solve_triangular(y.conj().T, z, upper=False, left=True, unitriangular=False).T.conj()
+    # If x = y y^*, then cholesky_solve(u^*, y)^* = u x^{-1}.  Expressing
+    # the right solve this way avoids manually transposing triangular factors.
+    # The previous implementation incorrectly marked y^* as lower triangular
+    # in its second solve, which corrupted every Cholesky-stage QDWH update.
+    y, info = torch.linalg.cholesky_ex(x, upper=False)
+    _check_cholesky_info(info, "QDWH Cholesky factorization failed.")
+    z = torch.cholesky_solve(u.mH, y, upper=False).mH
     
     return e * u + a_minus_e * z
 

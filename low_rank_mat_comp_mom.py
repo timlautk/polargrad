@@ -45,7 +45,8 @@ class LowRankModel(nn.Module):
         self.Y = nn.Parameter(torch.empty(n, r).uniform_(-1., 1.))
 
     def forward(self, target, mask):
-        mse_loss = torch.sum((self.X @ self.Y.T - target) ** 2) / mask.sum()
+        residual = mask * (self.X @ self.Y.T - target)
+        mse_loss = torch.sum(residual ** 2) / mask.sum()
         return mse_loss
 
 class LowRankModelAltGD(nn.Module):
@@ -78,7 +79,8 @@ class LowRankModelAltGD(nn.Module):
             mask: binary mask (m, n), 1 if observed, 0 if missing
         Returns:
             scalar loss        """
-        mse_loss = torch.sum((self.X @ self.Y.T - target) ** 2) / mask.sum()
+        residual = mask * (self.X @ self.Y.T - target)
+        mse_loss = torch.sum(residual ** 2) / mask.sum()
         return mse_loss
 
     def alternating_gradient_step(self, target, mask, num_inner_steps=1):
